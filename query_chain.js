@@ -18,7 +18,10 @@ module.exports = class QueryChain {
 
 	query(query = null, values = null) {
 		if (query && Array.isArray(query)) {
-			this._query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryChain ? obj : new QueryChain().query(obj, values)).build()).join('; ') + ';\nCOMMIT';
+			if (query.every(el => typeof(el) == 'string' && !el.includes(' ')))
+				this._table = query;
+			else
+				this._query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryChain ? obj : new QueryChain().query(obj, values)).build()).join('; ') + ';\nCOMMIT';
 			this._queryValues = values;
 		} else if (query && query.endsWith('.sql')) {
 			this._query = fs.readFileSync(query, 'utf8');
@@ -270,14 +273,23 @@ module.exports = class QueryChain {
 
 	batch(callback, db = null) {
 		(db || this._db).connect((err, client, done) => {
+			var tran = 0;
+
+			const exit = (err, docs, sqls) => {
+				if (callback)
+					callback(err, docs, sqls);
+
+				done();
+			};
+
 			const next = (err, docs, sqls, idx) => {
 				if (err) {
-					new QueryChain().rollback().fetch(() => {
-						if (callback)
-							callback(err, docs, sqls);
-
-						done();
-					}, client);
+					if (tran)
+						new QueryChain().rollback().fetch(() => {
+							exit(err, docs, sqls);
+						}, client);
+					else
+						exit(err, docs, sqls);
 				} else if (idx < this._query.length) {
 					let obj = this._query[idx];
 
@@ -286,6 +298,11 @@ module.exports = class QueryChain {
 
 					if (obj)
 						(obj instanceof QueryChain ? obj : new QueryChain().query(obj, this._queryValues)).fetch((err, doc, sql) => {
+							if (obj._query == 'BEGIN')
+								tran++;
+							else if (obj._query == 'COMMIT' || obj._query == 'ROLLBACK')
+								tran--;
+
 							docs.push(doc);
 							sqls.push(sql);
 
@@ -294,18 +311,18 @@ module.exports = class QueryChain {
 					else
 						next(err, docs, sqls, idx + 1);
 				} else {
-					new QueryChain().commit().fetch(err => {
-						if (callback)
-							callback(err, docs, sqls);
-
-						done();
-					}, client);
+					if (tran)
+						new QueryChain().commit().fetch(err => {
+							exit(err, docs, sqls);
+						}, client);
+					else
+						exit(err, docs, sqls);
 				}
 			};
 
-			new QueryChain().begin().fetch(err => {
-				next(err, [ ], [ ], 0);
-			}, client);
+//			new QueryChain().begin().fetch(err => {
+				next(null/*err*/, [ ], [ ], 0);
+//			}, client);
 		});
 	}
 
@@ -333,8 +350,8 @@ module.exports = class QueryChain {
 			return `ALTER TABLE ${this._table} ${this._dropColumn}`;
 		else
 			sql = this._table
-				? `SELECT ${this._select} FROM ${Array.isArray(this._table) ? this._table.join(', ') : this._table}`
-				: `SELECT ${this._select}`;
+				? `SELECT ${this._select ? this._select : '*'} FROM ${Array.isArray(this._table) ? this._table.join(', ') : this._table}`
+				: `SELECT ${this._select ? this._select : '*'}`;
 
 		if (this._where)
 			sql += ` WHERE ${this._where}`;
@@ -368,7 +385,7 @@ module.exports = class QueryChain {
 		} else {
 			(db || this._db).query(sql, this._queryValues, (err, doc) => {
 				if (doc) {
-					if (this._select)
+					if (/*this._select*/doc.rows && Object.keys(doc.rows).length == doc.rowCount)
 						doc = doc.rowCount > 0 ? this._limit == 1 ? doc.rows[0] : doc.rows : null;
 					else if (this._createDatabase)
 						doc = this._createDatabase;
