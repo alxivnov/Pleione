@@ -167,6 +167,12 @@
 			return $arr;
 		}
 
+		public function first($db) {
+			$arr = $this->limit(1)->fetch($db);
+
+			return count($arr) ? $arr[0] : NULL;
+		}
+
 		public function print($db = NULL, $format = NULL) {
 			if ($db == NULL)
 				echo($this->build());

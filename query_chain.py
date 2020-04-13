@@ -23,7 +23,7 @@ class QueryChain:
 			sql = "SELECT {}"
 			if self._dic.get("select"):
 				if isinstance(self._dic["select"], list):
-					sql = sql.format(", ".join([(i if "*" in i or "(" in i else "`{}`".format(i)) for i in self._dic["select"]]))
+					sql = sql.format(", ".join([(i if "*" in i or "(" in i or " AS " in i else "`{}`".format(i)) for i in self._dic["select"]]))
 				else:
 					sql = sql.format(self._dic["select"])
 			else:
