@@ -407,6 +407,18 @@ module.exports = class QueryChain {
 		return conflict.join(', ');
 	}
 
+	count(col) {
+		this._object.count = col || '*';
+
+		return this;
+	}
+
+	_count() {
+		return this._object.count == '*'
+			? 'COUNT(*)'
+			: `COUNT("${this._object.count}")`;
+	}
+
 	/*
 	WARNING: Switch first to fetching
 	*/
@@ -519,14 +531,19 @@ module.exports = class QueryChain {
 			const exit = (err, docs, sqls) => {
 				if (callback)
 					(Array.isArray(callback) ? callback : [callback]).forEach(callback => {
+						let isObject = this._object.query instanceof Object && !Array.isArray(this._object.query);
+
+						if (isObject)
+							docs = Object.keys(this._object.query).reduce((prev, curr, index) => {
+								if (docs.length > index)
+									prev[curr] = docs[index];
+								return prev;
+							}, {});
+
 						if (typeof (callback.send) == 'function')
-							callback.send(this._object.query instanceof Object
-								? Object.keys(this._object.query).reduce((prev, curr, index) => {
-									if (docs.length > index)
-										prev[curr] = docs[index];
-									return prev;
-								}, { docs, sqls, err: err ? err : undefined, msg: err ? err.toString() : undefined })
-								: { doc: docs, err: err, msg: err ? err.toString() : undefined });
+							callback.send(isObject
+								? { ...docs, err: err ? err : undefined, msg: err ? err.toString() : undefined }
+								: { doc: docs, err: err ? err : undefined, msg: err ? err.toString() : undefined });
 						else
 							callback(err, docs, sqls);
 					});
@@ -536,7 +553,7 @@ module.exports = class QueryChain {
 			};
 
 			const next = (err, docs, sqls, idx) => {
-				let arr = Array.isArray(this._object.query) || Object.values(this._object.query);
+				let arr = Array.isArray(this._object.query) ? this._object.query : Object.values(this._object.query);
 
 				if (err) {
 					if (tran)
@@ -661,6 +678,20 @@ module.exports = class QueryChain {
 	fetch(callback, db = null) {
 		if (!callback)
 			return this.execute(db);
+
+		if (this._object.count) {
+			if (this._object.select)
+				this._object.query = {
+					doc: new QueryChain()
+						.query(null, { ...this._object, count: undefined }),
+					len: new QueryChain()
+						.query(null, { table: this._object.table, where: this._object.where })
+						.select({ $: 'count', count: this._count() })
+						.limit(0)
+				};
+			else
+				this.select({ $: 'count', count: this._count() });
+		}
 
 		if (Array.isArray(this._object.query) || this._object.query instanceof Object)
 			return this.batch(callback, db);
