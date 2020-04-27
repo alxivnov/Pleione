@@ -78,8 +78,8 @@ module.exports = class QueryChain {
 				else																// SELECT ALL
 					this.where(req.query);
 			}
-		} else if (query && Array.isArray(query)) {
-			if (query.every(el => typeof(el) == 'string' && !el.includes(' ')))
+		} else if (query && (Array.isArray(query) || typeof (query) == 'object')) {
+			if (Array.isArray(query) && query.every(el => typeof (el) == 'string' && !el.includes(' ')))
 				this._object.table = query;
 			else
 				this._object.query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryChain ? obj : new QueryChain().query(obj, values)).build()).join('; ') + ';\nCOMMIT';
@@ -134,7 +134,11 @@ module.exports = class QueryChain {
 
 	_table() {
 		return Array.isArray(this._object.table)
-			? this._object.table.map(this._alias).join(', ')
+			? this._object.table.map(el => {
+				return el instanceof Object
+					? Object.keys(el).map(key => `${el[key]} ${key}`)
+					: el
+			}).join(', ')
 			: this._object.table instanceof Object
 				? '(' + new QueryChain().query(null, this._object.table).build() + ') query'
 				: this._object.table;
@@ -165,21 +169,23 @@ module.exports = class QueryChain {
 						return `${val}`;
 					}).join(', ')
 					: obj instanceof Object
-						? Object.keys(obj).filter(key => key != '_').map(key => {
+						? Object.keys(obj).filter(key => key != '_' && !(key == '$' && obj[obj[key]] !== undefined)).map(key => {
 							let val = obj[key];
 
-							if (key == '$' && obj[val] !== undefined)
-								return undefined;
+//							if (key == '$' && obj[val] !== undefined)
+//								return undefined;
 
 							if (val instanceof QueryChain)
 								val = `(${val.build()})`;
 							else if (val instanceof Object)
-								val = `(${new QueryChain().query(val.table, val).build()})`;
+								val = /*Object.keys(val).every(key => key == '$')
+									? val.$
+									:*/ `(${new QueryChain().query(val.table, val).build()})`;
 							else if (typeof(val) == 'string' && !val.match(/\W/))
 								val = `"${val}"`;
 
 							return key == '$' ? val : `${val} AS ${key}`;
-						}).filter(el => el !== undefined).join(', ')
+						})/*.filter(el => el !== undefined)*/.join(', ')
 						: typeof(obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 			}).join(', ');
 	}
@@ -366,7 +372,7 @@ module.exports = class QueryChain {
 					if (typeof(key) == 'string' && !key.match(/\W/))
 						key = `"${key}"`;
 
-					if (typeof(val) == 'number')
+					if ([ 'number', 'boolean' ].includes(typeof (val)))
 						val = val > 0 ? 'ASC' : 'DESC';
 
 					return `${key} ${val}`;
@@ -680,7 +686,7 @@ module.exports = class QueryChain {
 			return this.execute(db);
 
 		if (this._object.count) {
-			if (this._object.select)
+//			if (this._object.select)
 				this._object.query = {
 					doc: new QueryChain()
 						.query(null, { ...this._object, count: undefined }),
@@ -689,8 +695,8 @@ module.exports = class QueryChain {
 						.select({ $: 'count', count: this._count() })
 						.limit(0)
 				};
-			else
-				this.select({ $: 'count', count: this._count() });
+//			else
+//				this.select({ $: 'count', count: this._count() });
 		}
 
 		if (Array.isArray(this._object.query) || this._object.query instanceof Object)
