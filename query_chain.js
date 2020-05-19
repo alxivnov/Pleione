@@ -6,16 +6,13 @@ module.exports = class QueryChain {
 	constructor(db = null, log = null) {
 		this._db = db;
 
-		if (log) {
-			if (log.includes('err'))
-				this._logErr = true;
-			if (log.includes('doc'))
-				this._logDoc = true;
-			if (log.includes('sql'))
-				this._logSql = true;
-		}
+		this._log = typeof (log) == 'string' ? {
+			err: log.includes('err'),
+			sql: log.includes('sql'),
+			doc: log.includes('doc')
+		} : (log || {});
 
-		this._object = { };
+		this._object = {};
 	}
 
 	_alias(el) {
@@ -31,58 +28,106 @@ module.exports = class QueryChain {
 	}
 
 	query(query = null, values = null) {
-		if (query && typeof (query.is) == 'function') {
+		if (query && typeof (query.is) == 'function' && values && values.$) {
 			let req = query;
-			let id = parseInt(req.params.id);
+			let key = values.$;
+			let val = values._;
+			if (val) {
+				let setting = req.params.id;
+				let other = Object.keys(values).filter(el => ![ '$', '_' ].includes(el)).reduce((prev, curr) => {
+					prev[curr] = values[curr];
 
-			this.table(query.params.table.split('|').map(this._alias));
+					return prev;
+				}, {});
 
-			if (req.method == 'POST') {
-				if (!isNaN(id) && id > 0)												// UPDATE BY ID
-					this.update(req.body).where({ _id: id });
-				else if (req.params.id == '*')											// UPDATE WHERE
-					this.update(req.body.update).where(req.body.where);
-				else if (!isNaN(id) && id < 0)											// DELETE BY ID
-					this.delete().where({ _id: Math.abs(id) });
-				else if (req.params.id == '-')											// DELETE WHERE
-					this.delete().where(req.body.where);
-				else if (req.params.id)													// INSERT: +, 0
-					this.insert(...(Array.isArray(req.body) ? req.body : [req.body]));
-				else
-					this._object.query = {
-						doc: new QueryChain()
-							.table(this._object.table)
-							.select(req.body.select)
-							.where(req.body.where)
-							.order(req.body.order)
-							.limit(req.body.limit)
-							.offset(req.body.offset),
-						len: () => {
-							//
-//							console.log('body', req.body);
+				this.table(req.params.table);
 
-							return req.body.count || req.body.len
-								? new QueryChain()
-									.table(this._object.table)
-									.select({ $: 'count', count: 'COUNT(*)' })
-									.where(req.body.where)
-									.limit(0)
-								: null;
+				if (req.method == 'POST') {
+					if (setting) {
+						if (req.body != null) {
+							let str = JSON.stringify(req.body);
+
+							this.insert({ ...other, [key]: setting, [val]: str })
+								.conflict(...Object.keys(other), key)
+								.update({ [val]: str });
+						} else {
+							this.delete().where({ ...other, [key]: setting });
 						}
-					};
+					} else {
+						let columns = Object.keys(req.body);
+
+						this.query([
+							new QueryChain(null, this._log).begin(),
+
+							new QueryChain(null, this._log)
+								.table(req.params.table)
+								.delete()
+								.where({ ...other, [key]: columns }),
+							new QueryChain(null, this._log)
+								.table(req.params.table)
+								.insert(...columns.filter(el => req.body[el] != null).map(el => {
+									return { ...other, [key]: el, [val]: JSON.stringify(req.body[el]) };
+								}))
+						]);
+					}
+				} else {
+					if (setting)
+						this.select({ $: val }).where({ ...other, [key]: setting }).limit(0);
+					else
+						this.select({ $: key, _: val }, val);
+				}
 			} else {
-				if (!isNaN(id))														// SELECT BY ID
-					this.where({ ...req.query, _id: id }).limit(0);
-				else if (req.params.id)												// SELECT COLUMNS
-					this.select(req.params.id.split('|').map(this._alias)).where(req.query);
-				else																// SELECT ALL
-					this.where(req.query);
+				let id = parseInt(req.params.id);
+
+				this.table(query.params.table.split('|').map(this._alias));
+
+				if (req.method == 'POST') {
+					if (!isNaN(id) && id > 0)												// UPDATE BY ID
+						this.update(req.body).where({ [key]: id });
+					else if (req.params.id == '*')											// UPDATE WHERE
+						this.update(req.body.update).where(req.body.where);
+					else if (!isNaN(id) && id < 0)											// DELETE BY ID
+						this.delete().where({ [key]: Math.abs(id) });
+					else if (req.params.id == '-')											// DELETE WHERE
+						this.delete().where(req.body.where);
+					else if (req.params.id)													// INSERT: +, 0
+						this.insert(...(Array.isArray(req.body) ? req.body : [req.body]));
+					else
+						this._object.query = {
+							doc: new QueryChain(null, this._log)
+								.table(this._object.table)
+								.select(req.body.select)
+								.where(req.body.where)
+								.order(req.body.order)
+								.limit(req.body.limit)
+								.offset(req.body.offset),
+							len: () => {
+//
+//								console.log('body', req.body);
+
+								return req.body.count || req.body.len
+									? new QueryChain(null, this._log)
+										.table(this._object.table)
+										.select({ $: 'count', count: 'COUNT(*)' })
+										.where(req.body.where)
+										.limit(0)
+									: null;
+							}
+						};
+				} else {
+					if (!isNaN(id))														// SELECT BY ID
+						this.where({ ...req.query, [key]: id }).limit(0);
+					else if (req.params.id)												// SELECT COLUMNS
+						this.select(req.params.id.split('|').map(this._alias)).where(req.query);
+					else																// SELECT ALL
+						this.where(req.query);
+				}
 			}
 		} else if (query && (Array.isArray(query) || typeof (query) == 'object')) {
 			if (Array.isArray(query) && query.every(el => typeof (el) == 'string' && !el.includes(' ')))
 				this._object.table = query;
 			else
-				this._object.query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryChain ? obj : new QueryChain().query(obj, values)).build()).join('; ') + ';\nCOMMIT';
+				this._object.query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryChain ? obj : new QueryChain(null, this._log).query(obj, values)).build()).join('; ') + ';\nCOMMIT';
 			this._object.queryValues = values;
 		} else if (query && query.endsWith('.sql')) {
 			this._object.query = fs.readFileSync(query, 'utf8');
@@ -136,11 +181,15 @@ module.exports = class QueryChain {
 		return Array.isArray(this._object.table)
 			? this._object.table.map(el => {
 				return el instanceof Object
-					? Object.keys(el).map(key => `${el[key]} ${key}`)
+					? el.select
+						?`(${new QueryChain(null, this._log).query(null, el).build()}) query`
+						: Object.keys(el).map(key => `${el[key]} AS ${key}`)
 					: el
 			}).join(', ')
 			: this._object.table instanceof Object
-				? '(' + new QueryChain().query(null, this._object.table).build() + ') query'
+				? this._object.table.select
+					? `(${new QueryChain(null, this._log).query(null, this._object.table).build()}) query`
+					: Object.keys(this._object.table).map(key => `${this._object.table[key]} AS ${key}`)
 				: this._object.table;
 	}
 
@@ -162,7 +211,7 @@ module.exports = class QueryChain {
 						if (val instanceof QueryChain)
 							val = `(${val.build()})`;
 						else if (val instanceof Object)
-							val = `(${new QueryChain().query(val.table, val).build()})`;
+							val = `(${new QueryChain(null, this._log).query(val.table, val).build()})`;
 						else if (typeof(val) == 'string' && !val.match(/\W/))
 							val = `"${val}"`;
 
@@ -180,13 +229,46 @@ module.exports = class QueryChain {
 							else if (val instanceof Object)
 								val = /*Object.keys(val).every(key => key == '$')
 									? val.$
-									:*/ `(${new QueryChain().query(val.table, val).build()})`;
+									:*/ `(${new QueryChain(null, this._log).query(val.table, val).build()})`;
 							else if (typeof(val) == 'string' && !val.match(/\W/))
 								val = `"${val}"`;
 
 							return key == '$' ? val : `${val} AS ${key}`;
 						})/*.filter(el => el !== undefined)*/.join(', ')
 						: typeof(obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
+			}).join(', ');
+	}
+
+	return(...cols) {
+		this._object.return = cols && cols.every(el => el) ? cols : [];
+
+		return this;
+	}
+
+	_return() {
+		let cols = this._object.return;
+
+		if (cols.length == 0)
+			return "*";
+		else
+			return cols.map(obj => {
+				return Array.isArray(obj)
+					? obj.map(val => {
+						if (typeof (val) == 'string' && !val.match(/\W/))
+							val = `"${val}"`;
+
+						return `${val}`;
+					}).join(', ')
+					: obj instanceof Object
+						? Object.keys(obj).filter(key => key != '_' && !(key == '$' && obj[obj[key]] !== undefined)).map(key => {
+							let val = obj[key];
+
+							if (typeof (val) == 'string' && !val.match(/\W/))
+								val = `"${val}"`;
+
+							return key == '$' ? val : `${val} AS ${key}`;
+						}).join(', ')
+						: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 			}).join(', ');
 	}
 
@@ -223,7 +305,7 @@ module.exports = class QueryChain {
 				else if (val instanceof QueryChain)
 					val = `(${val.build()})`;
 				else if (val instanceof Object)
-					val = `(${new QueryChain().query(null, val).build()})`;
+					val = `(${new QueryChain(null, this._log).query(null, val).build()})`;
 
 				return val;
 			}).join(', ') : obj;
@@ -256,7 +338,7 @@ module.exports = class QueryChain {
 				else if (val instanceof QueryChain)
 					val = `(${val.build()})`;
 				else if (val instanceof Object)
-					val = `(${new QueryChain().query(null, val).build()})`;
+					val = `(${new QueryChain(null, this._log).query(null, val).build()})`;
 
 				return `${key}=${val}`;
 			}).join(', ') : obj;
@@ -301,7 +383,7 @@ module.exports = class QueryChain {
 						if (Object.keys(val).includes('$'))
 							return `${key} = ${val.$}`;
 
-						let tmp = val instanceof QueryChain ? val : new QueryChain().query(null, val).build();
+						let tmp = val instanceof QueryChain ? val : new QueryChain(null, this._log).query(null, val).build();
 
 						return val.limit == 1 || val.first == 1 ? `${key} = (${tmp})` : `${key} IN (${tmp})`
 					}
@@ -336,7 +418,9 @@ module.exports = class QueryChain {
 		if (!group)
 			return null;
 
-		return group.join(', ');
+		return group
+			.map(el => !el.match(/\W/) ? `"${el}"` : el)
+			.join(', ');
 	}
 
 	distinct(...distinct) {
@@ -550,8 +634,10 @@ module.exports = class QueryChain {
 							callback.send(isObject
 								? { ...docs, err: err ? err : undefined, msg: err ? err.toString() : undefined }
 								: { doc: docs, err: err ? err : undefined, msg: err ? err.toString() : undefined });
+						else if (isObject && this._object.count)
+							callback(err, docs.doc, docs.len, sqls);
 						else
-							callback(err, docs, sqls);
+							callback(err, docs, undefined, sqls);
 					});
 
 				if (done)
@@ -563,7 +649,7 @@ module.exports = class QueryChain {
 
 				if (err) {
 					if (tran)
-						new QueryChain().rollback().fetch(() => {
+						new QueryChain(null, this._log).rollback().fetch(() => {
 							exit(err, docs, sqls);
 						}, client);
 					else
@@ -575,7 +661,7 @@ module.exports = class QueryChain {
 						obj = obj(docs, err, sqls);
 
 					if (obj) {
-						(obj instanceof QueryChain ? obj : new QueryChain().query(obj, this._object.queryValues)).fetch((err, doc, sql) => {
+						(obj instanceof QueryChain ? obj : new QueryChain(null, this._log).query(obj, this._object.queryValues)).fetch((err, doc, sql) => {
 							if (obj._object.query == 'BEGIN')
 								tran++;
 							else if (obj._object.query == 'COMMIT' || obj._object.query == 'ROLLBACK')
@@ -594,7 +680,7 @@ module.exports = class QueryChain {
 					}
 				} else {
 					if (tran)
-						new QueryChain().commit().fetch(err => {
+						new QueryChain(null, this._log).commit().fetch(err => {
 							exit(err, docs, sqls);
 						}, client);
 					else
@@ -602,7 +688,7 @@ module.exports = class QueryChain {
 				}
 			};
 
-//			new QueryChain().begin().fetch(err => {
+//			new QueryChain(null, this._log).begin().fetch(err => {
 				next(null/*err*/, [ ], [ ], 0);
 //			}, client);
 		});
@@ -619,12 +705,19 @@ module.exports = class QueryChain {
 		if (this._object.insert) {
 			sql = `INSERT INTO ${this._table()} ${this._insert()}`;
 
-			if (this._object.conflict)
-				sql += ` ON CONFLICT (${this._conflict()}) DO ${
-					this._object.update
-						? 'UPDATE SET ' + this._update()
-						: 'NOTHING'
-				}`;
+			if (this._object.return)
+				sql += ` RETURNING ${this._return()}`;
+
+			if (this._object.conflict) {
+				sql += ` ON CONFLICT (${this._conflict()})`;
+				if (this._object.update)
+					sql += ` DO UPDATE SET ${this._update()}`;
+				let where = this._where();
+				if (where)
+					sql += ` WHERE ${where}`;
+				if (!this._object.update)
+					sql += ' DO NOTHING';
+			}
 
 			return sql;
 		} else if (this._object.update)
@@ -688,10 +781,23 @@ module.exports = class QueryChain {
 		if (this._object.count) {
 //			if (this._object.select)
 				this._object.query = {
-					doc: new QueryChain()
+					doc: new QueryChain(null, this._log)
 						.query(null, { ...this._object, count: undefined }),
-					len: new QueryChain()
-						.query(null, { table: this._object.table, where: this._object.where })
+					len: new QueryChain(null, this._log)
+						.query(null, this._object.select && this._select().includes('(')
+							? {
+								table: {
+									table: this._object.table,
+									where: this._object.where,
+									group: this._object.group,
+									select: this._object.select
+								}
+							}
+							: {
+								table: this._object.table,
+								where: this._object.where,
+								group: this._object.group
+							})
 						.select({ $: 'count', count: this._count() })
 						.limit(0)
 				};
@@ -704,8 +810,8 @@ module.exports = class QueryChain {
 
 		let sql = this.build();
 
-		if (this._logSql)
-			console.log(sql);
+		if (this._log.sql)
+			console.log('SQL', sql);
 
 		if (db == null && this._db == null) {
 			if (callback)
@@ -717,7 +823,7 @@ module.exports = class QueryChain {
 			(db || this._db).query(sql, this._object.queryValues, (err, doc) => {
 				if (doc) {
 					if (/*this._object.select*/doc.rows && Object.keys(doc.rows).length == doc.rowCount) {
-						let cols = this._object.select || this._object.columns;
+						let cols = this._object.select || this._object.return || this._object.columns;
 						let col = cols
 							? cols.find(el => el instanceof Object && typeof (el.$) == 'string')
 							: null;
@@ -742,13 +848,13 @@ module.exports = class QueryChain {
 						doc = doc.rowCount;
 				}
 
-				if (this._logErr && err) {
-					if (!this._logSql)
-						console.log(sql);
+				if (this._log.err && err) {
+					if (!this._log.sql)
+						console.log('SQL', sql);
 
-					console.log(err.toString());
-				} else if (this._logDoc) {
-					console.log(doc);
+					console.log('ERR', err.toString());
+				} else if (this._log.doc) {
+					console.log('DOC', doc);
 				}
 
 				if (callback)
@@ -756,7 +862,7 @@ module.exports = class QueryChain {
 						if (typeof (callback.send) == 'function')
 							callback.send({ doc: doc, err: err, msg: err ? err.toString() : undefined });
 						else if (typeof (callback) == 'function')
-							callback(err, doc, sql);
+							callback(err, doc, undefined, sql);
 					});
 			});
 		}
