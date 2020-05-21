@@ -7,9 +7,10 @@ module.exports = class QueryChain {
 		this._db = db;
 
 		this._log = typeof (log) == 'string' ? {
+			doc: log.includes('doc'),
 			err: log.includes('err'),
-			sql: log.includes('sql'),
-			doc: log.includes('doc')
+			obj: log.includes('obj'),
+			sql: log.includes('sql')
 		} : (log || {});
 
 		this._object = {};
@@ -357,20 +358,24 @@ module.exports = class QueryChain {
 		return this;
 	}
 
-	_where() {
-		let where = this._object.where;
+	_where(where) {
+		let first = where === undefined;
+
+		if (first)
+			where = this._object.where;
+
 		if (!where)
 			return null;
 
-		let proc = where => where.map(arg => {
+		let args = (Array.isArray(where) ? where : [where]).map(arg => {
 			if (Array.isArray(arg))
-				return arg.length ? '(' + proc(arg).join(' OR ') + ')' : null;
+				return arg.length ? this._where(arg) : null;
 			else if (arg instanceof Object)
 				return Object.keys(arg).map(key => {
 					var val = arg[key];
 
 					if (key == '$') {
-						return val ? '(' + proc(Array.isArray(val) ? val : [ val ]).join(' OR ') + ')' : null;
+						return this._where(val);
 					} else if (Array.isArray(val)) {
 						let arr = val.map(tmp => typeof (tmp) == 'string' && tmp != 'NOW()' && !tmp.match(/^\$\d+\./)
 							? `'${tmp.replace(/\'/g, '\'\'')}'`
@@ -381,7 +386,7 @@ module.exports = class QueryChain {
 						return arr.length > 0 ? `${key} IN ( ${arr.join(', ')} )` : 'FALSE';
 					} else if (val instanceof Object) {
 						if (Object.keys(val).includes('$'))
-							return `${key} = ${val.$}`;
+							return `${key} = ${this._where(val)}`;
 
 						let tmp = val instanceof QueryChain ? val : new QueryChain(null, this._log).query(null, val).build();
 
@@ -393,7 +398,7 @@ module.exports = class QueryChain {
 					else */if (typeof(val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
 						val = `'${val.replace(/\'/g, '\'\'')}'`;
 					else if (val instanceof Object && Object.keys(val).includes('$'))
-						val = val.$;
+						val = this._where(val);
 					else if (val instanceof QueryChain)
 						val = `(${val.build()})`;
 
@@ -402,9 +407,11 @@ module.exports = class QueryChain {
 			else
 				return arg;
 		});
-		let args = proc(where);
+//		let args = proc(where);
 
-		return args.join(' OR ');
+		return first
+			? args.join(' OR ')
+			: `(${args.join(' OR ')})`;
 	}
 
 	group(...group) {
@@ -807,6 +814,9 @@ module.exports = class QueryChain {
 
 		if (Array.isArray(this._object.query) || this._object.query instanceof Object)
 			return this.batch(callback, db);
+
+		if (this._log.obj)
+			console.log('OBJ', this._object);
 
 		let sql = this.build();
 
