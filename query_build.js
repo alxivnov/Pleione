@@ -1,4 +1,4 @@
-module.exports = class QueryBuild {
+class QueryBuild {
 	constructor(log) {
 		this._object = {};
 
