@@ -25,6 +25,14 @@
 			return arr.length > 1 ? { [arr[1]]: arr[0] } : el;
 		}
 
+		_assign(key, arg, def) {
+			this._object[key] = arg.length
+				? new Array(arg.length).fill().map((_, i) => arg[i])
+				: def;
+
+			return this;
+		}
+
 		_spread(method, values) {
 			if (Array.isArray(values))
 				method(...values);
@@ -422,8 +430,9 @@
 				: `COUNT("${this._object.count}")`;
 		}
 
-		createDatabase(database) {
+		createDatabase(database, owner) {
 			this._object.createDatabase = database;
+			this._object.owner = owner;
 
 			return this;
 		}
@@ -546,7 +555,7 @@
 			else if (this._object.delete)
 				sql = `DELETE FROM ${this._table()}`;
 			else if (this._object.createDatabase)
-				return `CREATE DATABASE ${this._object.createDatabase}`;
+				return `CREATE DATABASE ${this._object.createDatabase} OWNER ${this._object.owner || 'DEFAULT'}`;
 			else if (this._object.dropDatabase)
 				return `DROP DATABASE IF EXISTS ${this._object.dropDatabase}`;
 			else if (this._object.columns)
