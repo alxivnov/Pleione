@@ -20,24 +20,15 @@
 			} : (log || {});
 		}
 
-		_alias(el) {
-			let arr = el.split('~');
-			return arr.length > 1 ? { [arr[1]]: arr[0] } : el;
-		}
-
-		_assign(key, arg, def) {
-			this._object[key] = arg.length
-				? new Array(arg.length).fill().map((_, i) => arg[i])
-				: def;
-
-			return this;
-		}
-
-		_spread(method, values) {
+		_spreadIfArray(method, values) {
 			if (Array.isArray(values))
 				method(...values);
 			else
 				method(values);
+		}
+
+		_joinIfArray(array, separator = ', ') {
+			return Array.isArray(array) ? array.join(separator) : array;
 		}
 
 		query(query = null, values = null) {
@@ -54,33 +45,38 @@
 				this.table(query);
 
 				if (values.select)
-					this._spread(this.select.bind(this), values.select);
+					this._spreadIfArray(this.select.bind(this), values.select);
 				else if (values.insert)
-					this._spread(this.insert.bind(this), values.insert);
+					this._spreadIfArray(this.insert.bind(this), values.insert);
 				else if (values.update)
-					this._spread(this.update.bind(this), values.update);
+					this._spreadIfArray(this.update.bind(this), values.update);
 				else if (values.delete)
-					this.delete();
+					this.delete(values.delete);
 
 				if (values.table)
 					this.table(values.table);
+				if (values.join)
+					this._spreadIfArray(this.join.bind(this), values.join);
 				if (values.where)
-					this._spread(this.where.bind(this), values.where);
+					this._spreadIfArray(this.where.bind(this), values.where);
 				if (values.group)
-					this._spread(this.group.bind(this), values.group);
+					this._spreadIfArray(this.group.bind(this), values.group);
 				if (values.distinct)
-					this._spread(this.distinct.bind(this), values.distinct);
+					this._spreadIfArray(this.distinct.bind(this), values.distinct);
 				if (values.order)
-					this._spread(this.order.bind(this), values.order);
+					this._spreadIfArray(this.order.bind(this), values.order);
 				if (values.limit)
 					this.limit(values.limit);
 				if (values.offset)
 					this.offset(values.offset);
 				if (values.first)
 					this.limit(0);
+
+				if (values.exists)
+					this.exists();
 			} else {
 				this._object.table = query;
-				//			this._object.select = '*';
+//				this._object.select = '*';
 			}
 
 			return this;
@@ -98,14 +94,74 @@
 					return el instanceof Object
 						? el.select
 							? `(${new QueryBuild(this._log).query(null, el).build()}) query`
-							: Object.keys(el).map(key => `${el[key]} AS ${key}`)
+							: Object.keys(el)
+								.filter(key => !(this._object.join && this._object.join.some(join => Object.keys(join).includes(key))))
+								.map(key => `${el[key]} AS ${key}`)
 						: el
-				}).join(', ')
+				}).filter(el => !Array.isArray(el) || el.length).join(', ')
 				: this._object.table instanceof Object
 					? this._object.table.select
 						? `(${new QueryBuild(this._log).query(null, this._object.table).build()}) query`
-						: Object.keys(this._object.table).map(key => `${this._object.table[key]} AS ${key}`)
+						: Object.keys(this._object.table)
+							.filter(key => !(this._object.join && this._object.join.some(join => Object.keys(join).includes(key))))
+							.map(key => `${this._object.table[key]} AS ${key}`)
+							.join(', ')
 					: this._object.table;
+		}
+
+		join(...args) {
+			this._object.join = args.filter(arg => !!arg);
+
+			return this;
+		}
+
+		_join(join_type) {
+			let arr = this._object.join;
+
+			if (!arr)
+				return null;
+
+			let aliases = Array.isArray(this._object.table) ? this._object.table : [ this._object.table ];
+			return `${arr.map((obj) => {
+				return obj instanceof Object
+					? Object.keys(obj).map(key => {
+						let val = obj[key];
+						if (typeof (val) == 'object' && val.from)
+							return {
+								join: val.join || join_type,
+								from: `(${new QueryBuild(this._log).query(null, val.from).build()})`,
+								as: key,
+								on: val.on
+							}
+						else if (typeof (val) == 'string')
+							return {
+								join: join_type,
+								from: val,
+								as: key
+							};
+
+						let alias = aliases.find(alias => alias[key]);
+						return {
+							join: join_type,
+							from: alias ? alias[key] : key,
+							as: alias ? key : undefined,
+							on: val
+						};
+					}).map((obj) => {
+						let join = obj.join ? `${obj.join} ` : '';
+						let from = `JOIN ${obj.from}`;
+						let as = obj.as ? ` AS ${obj.as}` : '';
+						let on = obj.on ? ` ON ${this._where(obj.on)}` : '';
+						return join + from + as + on;
+					}).join(' ')
+					: obj;
+			}).join(` ${join_type} `)}`;
+		}
+
+		exists() {
+			this._object.exists = true;
+
+			return this;
 		}
 
 		select(...cols) {
@@ -133,11 +189,11 @@
 							return `${val}`;
 						}).join(', ')
 						: obj instanceof Object
-							? Object.keys(obj).filter(key => key != '_' && !(key == '$' && obj[obj[key]] !== undefined)).map(key => {
+							? Object.keys(obj).filter(key => /*key != '_' &&*/ !([ '$', '_' ].includes(key) && obj[obj[key]] !== undefined)).map(key => {
 								let val = obj[key];
 
-								//							if (key == '$' && obj[val] !== undefined)
-								//								return undefined;
+//							if (key == '$' && obj[val] !== undefined)
+//								return undefined;
 
 								if (val instanceof QueryBuild)
 									val = `(${val.build()})`;
@@ -148,13 +204,13 @@
 								else if (typeof (val) == 'string' && !val.match(/\W/))
 									val = `"${val}"`;
 
-								return key == '$' ? val : `${val} AS ${key}`;
+								return [ '$', '_' ].includes(key) ? val : `${val} AS ${key}`;
 							})/*.filter(el => el !== undefined)*/.join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				}).join(', ');
 		}
 
-		return (...cols) {
+		return(...cols) {
 			this._object.return = cols && cols.every(el => el) ? cols : [];
 
 			return this;
@@ -175,13 +231,13 @@
 							return `${val}`;
 						}).join(', ')
 						: obj instanceof Object
-							? Object.keys(obj).filter(key => key != '_' && !(key == '$' && obj[obj[key]] !== undefined)).map(key => {
+							? Object.keys(obj).filter(key => /*key != '_' &&*/ !([ '$', '_' ].includes(key) && obj[obj[key]] !== undefined)).map(key => {
 								let val = obj[key];
 
 								if (typeof (val) == 'string' && !val.match(/\W/))
 									val = `"${val}"`;
 
-								return key == '$' ? val : `${val} AS ${key}`;
+								return [ '$', '_' ].includes(key) ? val : `${val} AS ${key}`;
 							}).join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				}).join(', ');
@@ -209,9 +265,9 @@
 				return obj instanceof Object ? keys.map(key => {
 					let val = obj[key];
 
-					if (val == undefined)
+					if (val === undefined)
 						val = 'DEFAULT';
-					else if (val == null)
+					else if (val === null)
 						val = 'NULL';
 					else if (typeof (val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
 						val = `'${val.replace(/\'/g, '\'\'')}'`;
@@ -219,8 +275,10 @@
 						val = val.$;
 					else if (val instanceof QueryBuild)
 						val = `(${val.build()})`;
-					else if (val instanceof Object)
+					else if (val instanceof Object && (val.select || val.return || val.tables || val.columns || val.table || val.query))
 						val = `(${new QueryBuild(this._log).query(null, val).build()})`;
+					else if (val instanceof Object)
+						val = `'${JSON.stringify(val).replace(/'/g, `''`)}'`;
 
 					return val;
 				}).join(', ') : obj;
@@ -237,14 +295,14 @@
 			return this;
 		}
 
-		_update() {
-			let vals = this._object.update;
+		_update(update) {
+			let vals = update || this._object.update;
 
 			return vals.map(obj => {
 				return obj instanceof Object ? Object.keys(obj).map(key => {
 					let val = obj[key];
 
-					if (val == null)
+					if (val === null)
 						val = 'NULL'
 					else if (typeof (val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
 						val = `'${val.replace(/\'/g, '\'\'')}'`;
@@ -260,8 +318,10 @@
 			}).join(', ');
 		}
 
-		delete () {
+		delete(...where) {
 			this._object.delete = '*';
+
+			this._object.where = where && where.every(el => el) ? where : null;
 
 			return this;
 		}
@@ -272,10 +332,8 @@
 			return this;
 		}
 
-		_where(where) {
-			let first = where === undefined;
-
-			if (first)
+		_where(where, separator) {
+			if (!where)
 				where = this._object.where;
 
 			if (!where)
@@ -283,13 +341,17 @@
 
 			let args = (Array.isArray(where) ? where : [where]).map(arg => {
 				if (Array.isArray(arg))
-					return arg.length ? this._where(arg) : null;
+					return arg.length ? `(${this._where(arg)})` : null;
 				else if (arg instanceof Object)
-					return Object.keys(arg).map(key => {
+					return Object.keys(arg).filter(key => arg[key] !== undefined).map(key => {
 						var val = arg[key];
 
 						if (key == '$') {
-							return this._where(val);
+							return `(${this._where(val)})`;
+						} else if (key == 'AND') {
+							return `(${this._where(val, 'AND')})`;
+						} else if (key == 'OR') {
+							return `(${this._where(val, 'OR')})`;
 						} else if (Array.isArray(val)) {
 							let arr = val.map(tmp => typeof (tmp) == 'string' && tmp != 'NOW()' && !tmp.match(/^\$\d+\./)
 								? `'${tmp.replace(/\'/g, '\'\'')}'`
@@ -297,35 +359,41 @@
 									? tmp.$
 									: tmp);
 
-							return arr.length > 0 ? `${key} IN ( ${arr.join(', ')} )` : 'FALSE';
+							return arr.length > 0 ? `${key} IN ( ${arr.map(el => el === null ? 'NULL' : el).join(', ')} )` : 'FALSE';
 						} else if (val instanceof Object) {
-							if (Object.keys(val).includes('$'))
-								return `${key} = ${this._where(val)}`;
+							let keys = Object.keys(val);
+
+							if (keys.includes('$'))
+								return `${key} = (${this._where(val)})`;
+							else if (keys.includes('_'))
+								return `(${this._where(val._)})`;
+							else if (keys.includes('AND'))
+								return `(${this._where(val.AND, 'AND')})`;
+							else if (keys.includes('OR'))
+								return `(${this._where(val.OR, 'OR')})`;
 
 							let tmp = val instanceof QueryBuild ? val : new QueryBuild(this._log).query(null, val).build();
 
-							return val.limit == 1 || val.first == 1 ? `${key} = (${tmp})` : `${key} IN (${tmp})`
+							return `${key} ${val instanceof QueryBuild || val.limit != 1 || val.first != 1 || !val.exists ? 'IN' : '='} (${tmp})`;
 						}
 
-					/*if (val == null)
+					/*if (val === null)
 						val = 'NULL';
 					else */if (typeof (val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
 							val = `'${val.replace(/\'/g, '\'\'')}'`;
 						else if (val instanceof Object && Object.keys(val).includes('$'))
-							val = this._where(val);
+							val = `(${this._where(val)})`;
 						else if (val instanceof QueryBuild)
 							val = `(${val.build()})`;
 
-						return val == null ? `${key} IS NULL` : `${key} = ${val}`;
+						return val === null ? `${key} IS NULL` : `${key} ${val instanceof QueryBuild ? 'IN' : '='} ${val}`;
 					}).join(' AND ');
 				else
 					return arg;
 			});
 			//		let args = proc(where);
 
-			return first
-				? args.join(' OR ')
-				: `(${args.join(' OR ')})`;
+			return args.join(separator ? ` ${separator} ` : ' OR ');
 		}
 
 		group(...group) {
@@ -342,6 +410,21 @@
 			return group
 				.map(el => !el.match(/\W/) ? `"${el}"` : el)
 				.join(', ');
+		}
+
+		having(...args) {
+			this._object.having = args && args.every(el => el) ? args : null;
+
+			return this;
+		}
+
+		_having() {
+			let having = this._object.having;
+
+			if (!having)
+				return null;
+
+			return this._where(this._object.having);
 		}
 
 		distinct(...distinct) {
@@ -390,7 +473,7 @@
 		}
 
 		limit(limit) {
-			if (limit === 0)
+			if (limit === 0 || limit === undefined)
 				this._object.first = 1;
 			else
 				this._object.limit = limit;
@@ -415,7 +498,10 @@
 			if (!conflict)
 				return null;
 
-			return conflict.join(', ');
+			let columns = conflict.filter(el => typeof (el) == 'string' && !el.match(/\s/)).join(', ');
+			let where = conflict.filter(el => typeof (el) != 'string' || el.match(/\s/)).map(el => this._where(el)).join(' AND ');
+
+			return `ON CONFLICT (${columns})` + (where ? ` WHERE ${where}` : '');
 		}
 
 		count(col) {
@@ -455,10 +541,43 @@
 			return this;
 		}
 
-		grantPrivileges(to, on, privileges = undefined, onModifier = undefined) {
-			this._object.query = `GRANT ${privileges ? privileges.join(', ') : 'ALL'} PRIVILEGES ON ${onModifier} ${on} TO ${to}`;
+		grant(to, on, privileges = undefined, onModifier = undefined) {
+			this._object.query = `GRANT ${this._joinIfArray(privileges) || 'ALL'} ON ${onModifier} ${this._joinIfArray(on)} TO ${this._joinIfArray(to)}`;
 
 			return this;
+		}
+
+		revoke(from, on, privileges = undefined, onModifier = undefined) {
+			this._object.query = `REVOKE ${this._joinIfArray(privileges) || 'ALL'} ON ${onModifier} ${this._joinIfArray(on)} TO ${this._joinIfArray(from)}`;
+
+			return this;
+		}
+
+		tables(...cols) {
+			this._object.tables = cols && cols.every(el => el) ? cols : [];
+
+			return this;
+		}
+
+		_tables() {
+			let cols = this._object.tables;
+
+			return cols.length
+				? cols.map(obj => {
+					return obj instanceof Object
+						? Object.keys(obj).map(key => {
+							let val = obj[key];
+
+							if (typeof (val) == 'string' && !val.match(/\W/))
+								val = `"${val}"`;
+
+							return key == '$' ? val : `${val} AS ${key}`;
+						}).join(', ')
+						: typeof (obj) == 'string' && !obj.match(/\W/)
+							? `"${obj}"`
+							: obj;
+				}).join(', ')
+				: '*';
 		}
 
 		columns(...cols) {
@@ -525,7 +644,7 @@
 		}
 
 		build() {
-			if (this._object.query)
+			if (this._object.query != null)
 				return this._object.query;
 
 			this._object.queryValues = null;
@@ -533,15 +652,23 @@
 			var sql = null;
 
 			if (this._object.insert) {
-				sql = `INSERT INTO ${this._table()} ${this._insert()}`;
+				let insert = this._insert();
+				if (!insert.length)
+					return null;
 
-				if (this._object.return)
-					sql += ` RETURNING ${this._return()}`;
+				sql = `INSERT INTO ${this._table()} ${insert}`;
 
 				if (this._object.conflict) {
-					sql += ` ON CONFLICT (${this._conflict()})`;
+					sql += ` ${this._conflict()}`;
 					if (this._object.update)
-						sql += ` DO UPDATE SET ${this._update()}`;
+						sql += ` DO UPDATE SET ${this._update(this._object.update.length ? this._object.update : [ this._object.insert
+							.filter(row => row instanceof Object)
+							.flatMap(row => Object.keys(row))
+							.reduce((cols, col) => {
+								if (!cols[col] && !this._object.conflict.includes(col))
+									cols[col] = { $: `excluded.${col}` };
+								return cols;
+							}, {}) ])}`;
 					let where = this._where();
 					if (where)
 						sql += ` WHERE ${where}`;
@@ -549,16 +676,29 @@
 						sql += ' DO NOTHING';
 				}
 
+				if (this._object.return)
+					sql += ` RETURNING ${this._return()}`;
+				else if (this._object.select)
+					sql += ` RETURNING ${this._select()}`;
+
 				return sql;
-			} else if (this._object.update)
-				sql = `UPDATE ${this._table()} SET ${this._update()}`;
-			else if (this._object.delete)
+			} else if (this._object.update) {
+				let update = this._update();
+				if (!update.length)
+					return null;
+
+				sql = `UPDATE ${this._table()} SET ${update}`;
+			} else if (this._object.delete)
 				sql = `DELETE FROM ${this._table()}`;
 			else if (this._object.createDatabase)
 				return `CREATE DATABASE ${this._object.createDatabase} OWNER ${this._object.owner || 'DEFAULT'}`;
 			else if (this._object.dropDatabase)
 				return `DROP DATABASE IF EXISTS ${this._object.dropDatabase}`;
-			else if (this._object.columns)
+			else if (this._object.tables) {
+				let where = this._where();
+				let query = `SELECT ${this._tables()} FROM pg_tables`;
+				return query + (where ? ` WHERE ${where}` : '');
+			} else if (this._object.columns)
 				return `SELECT ${this._columns()}
 					FROM information_schema.columns
 					WHERE table_name = '${this._table()}'`;
@@ -573,12 +713,20 @@
 				if (distinct)
 					sql += ` DISTINCT ON (${distinct})`;
 
-				sql += this._object.table
-					? ` ${this._object.select
-						? this._select()
-						: '*'} FROM ${this._table()}`
-					: ` ${this._object.select ? this._select() : '*'}`;
+				if (this._object.select)
+					sql += ` ${this._select()}`
+				else if (this._object.exists)
+					sql += ' 1';
+				else
+					sql += ' *';
+
+				if (this._object.table)
+					sql += ` FROM ${this._table()}`;
 			}
+
+			let join = this._join('LEFT');
+			if (join)
+				sql += ` ${join}`;
 
 			let where = this._where();
 			if (where)
@@ -586,6 +734,9 @@
 			let group = this._group();
 			if (group)
 				sql += ` GROUP BY ${group}`;
+			let having = this._having();
+			if (having)
+				sql += ` HAVING ${having}`;
 			let order = this._order();
 			if (order)
 				sql += ` ORDER BY ${order}`;
@@ -600,6 +751,9 @@
 				this._object.table.forEach((table, index) => {
 					sql = sql.replace(new RegExp(`\\$${index + 1}\\.`, 'g'), `${table}.`);
 				});
+
+			if (this._object.exists)
+				sql = `EXISTS(${sql})`;
 
 			return sql;
 		}
