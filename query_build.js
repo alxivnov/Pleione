@@ -104,7 +104,7 @@
 						? `(${new QueryBuild(this._log).query(null, this._object.table).build()}) query`
 						: Object.keys(this._object.table)
 							.filter(key => !(this._object.join && this._object.join.some(join => Object.keys(join).includes(key))))
-							.map(key => `${this._object.table[key]} AS ${key}`)
+							.map(key => `${this._object.table[key] instanceof QueryBuild ? '(' + this._object.table[key] + ')' : this._object.table[key]} AS ${key}`)
 							.join(', ')
 					: this._object.table;
 		}
@@ -197,6 +197,8 @@
 
 								if (val instanceof QueryBuild)
 									val = `(${val.build()})`;
+								else if (Array.isArray(val))
+									val = `COALESCE(${val.join(', ')})`;
 								else if (val instanceof Object)
 									val = /*Object.keys(val).every(key => key == '$')
 									? val.$
@@ -359,7 +361,8 @@
 									? tmp.$
 									: tmp);
 
-							return arr.length > 0 ? `${key} IN ( ${arr.map(el => el === null ? 'NULL' : el).join(', ')} )` : 'FALSE';
+							let isNull = arr.includes(null) ? ` OR ${key} IS NULL` : '';
+							return arr.length > 0 ? `(${key} IN (${arr.filter(el => el !== null).join(', ')})${isNull})` : 'FALSE';
 						} else if (val instanceof Object) {
 							let keys = Object.keys(val);
 
@@ -473,7 +476,7 @@
 		}
 
 		limit(limit) {
-			if (limit === 0 || limit === undefined)
+			if (limit === 0/* || limit === undefined*/)
 				this._object.first = 1;
 			else
 				this._object.limit = limit;

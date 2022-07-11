@@ -165,27 +165,32 @@ module.exports = class QueryChain extends QueryBuild {
 									: req.body.columns
 										? sql.columns(...(Array.isArray(req.body.columns) ? req.body.columns : [req.body.columns]))
 										: sql.select(req.body.select);
+						sql = sql
+							.table(this._object.table)
+//							.select(req.body.select)
+							.join(req.body.join)
+							.where({ ...req.query, ...req.body.where })
+							.group(...(Array.isArray(req.body.group) ? req.body.group : [req.body.group]))
+							.order(req.body.order)
+							.limit(req.body.limit)
+							.offset(req.body.offset)
+							.distinct(req.body.distinct);
 						this._object.query = {
-							doc: sql
-								.table(this._object.table)
-//								.select(req.body.select)
-								.join(req.body.join)
-								.where({ ...req.query, ...req.body.where })
-								.group(req.body.group)
-								.order(req.body.order)
-								.limit(req.body.limit)
-								.offset(req.body.offset)
-								.distinct(req.body.distinct),
+							doc: sql,
 							len: () => {
 //
 //								console.log('body', req.body);
-
 								return req.body.count || req.body.len
-									? new QueryChain(null, log)
-										.table(this._object.table)
-										.select({ $: 'count', count: 'COUNT(*)' })
-										.join(req.body.join)
-										.where({ ...req.query, ...req.body.where })
+									? req.body.group
+										? new QueryChain(null, log)
+											.table({ query: sql.limit().offset() })
+											.select({ $: 'count', count: 'COUNT(*)' })
+										: new QueryChain(null, log)
+											.table(this._object.table)
+											.select({ $: 'count', count: 'COUNT(*)' })
+											.join(req.body.join)
+											.where({ ...req.query, ...req.body.where })
+//											.group(...group)
 										.limit(0)
 									: null;
 							}
@@ -381,23 +386,24 @@ module.exports = class QueryChain extends QueryBuild {
 							return col;
 						}, {});
 						var rows = this._cipherRows(doc.rows, true);
-						rows = col.$
-							? cols.length > 1 || col._
-								? rows.reduce((prev, curr) => {
-									prev[curr[col.$]] = col._
-										? Array.isArray(col._)
-											? col._.reduce((p, c) => {
-												p[c] = curr[c];
-												return p;
-											}, {})
-											: curr[col._ instanceof Object ? Object.keys(col._)[0] : col._]
-										: curr;
-									return prev;
-								}, {})
-								: rows.map(row => row[col.$])
-							: rows;
+						if (col.$ && (col._ || cols.length > 1)) {
+							doc = rows.reduce((prev, curr) => {
+								prev[curr[col.$]] = col._
+									? Array.isArray(col._)
+										? col._.reduce((p, c) => {
+											p[c] = curr[c];
+											return p;
+										}, {})
+										: curr[col._ instanceof Object ? Object.keys(col._)[0] : col._]
+									: curr;
+								return prev;
+							}, {});
+						} else {
+							if (col.$)
+								rows = rows.map(row => row[col.$]);
 
-						doc = this._object.first == 1 ? doc.rowCount > 0 ? rows[0] : null : rows;
+							doc = this._object.first == 1 ? doc.rowCount > 0 ? rows[0] : null : rows;
+						}
 					} else if (this._object.createDatabase)
 						doc = this._object.createDatabase;
 					else if (this._object.dropDatabase)
