@@ -304,7 +304,9 @@
 				return obj instanceof Object ? Object.keys(obj).map(key => {
 					let val = obj[key];
 
-					if (val === null)
+					if (val === undefined)
+						val = 'DEFAULT'
+					else if (val === null)
 						val = 'NULL'
 					else if (typeof (val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
 						val = `'${val.replace(/\'/g, '\'\'')}'`;
@@ -312,8 +314,10 @@
 						val = val.$;
 					else if (val instanceof QueryBuild)
 						val = `(${val.build()})`;
-					else if (val instanceof Object)
+					else if (val instanceof Object && (val.select || val.return || val.tables || val.columns || val.table || val.query))
 						val = `(${new QueryBuild(this._log).query(null, val).build()})`;
+					else if (val instanceof Object)
+						val = `'${JSON.stringify(val).replace(/'/g, `''`)}'`;
 
 					return `${key}=${val}`;
 				}).join(', ') : obj;
@@ -323,7 +327,8 @@
 		delete(...where) {
 			this._object.delete = '*';
 
-			this._object.where = where && where.every(el => el) ? where : null;
+			if (where && where.length && where.every(el => el))
+				this._object.where = where;
 
 			return this;
 		}
@@ -377,7 +382,7 @@
 
 							let tmp = val instanceof QueryBuild ? val : new QueryBuild(this._log).query(null, val).build();
 
-							return `${key} ${val instanceof QueryBuild || val.limit != 1 || val.first != 1 || !val.exists ? 'IN' : '='} (${tmp})`;
+							return `${key} ${val instanceof QueryBuild || val.limit != 1 || val.first != 1 || !val.exists || tmp ? 'IN' : '='} (${tmp})`;
 						}
 
 					/*if (val === null)
@@ -663,19 +668,25 @@
 
 				if (this._object.conflict) {
 					sql += ` ${this._conflict()}`;
-					if (this._object.update)
-						sql += ` DO UPDATE SET ${this._update(this._object.update.length ? this._object.update : [ this._object.insert
+					var update = this._object.update;
+					if (update && !update.length) {
+						let excluded = this._object.insert
 							.filter(row => row instanceof Object)
 							.flatMap(row => Object.keys(row))
 							.reduce((cols, col) => {
 								if (!cols[col] && !this._object.conflict.includes(col))
 									cols[col] = { $: `excluded.${col}` };
 								return cols;
-							}, {}) ])}`;
+							}, {});
+						if (Object.keys(excluded).length)
+							update = [excluded];
+					}
+					if (update && update.length)
+						sql += ` DO UPDATE SET ${this._update(update)}`;
 					let where = this._where();
 					if (where)
 						sql += ` WHERE ${where}`;
-					if (!this._object.update)
+					if (!update || !update.length)
 						sql += ' DO NOTHING';
 				}
 
