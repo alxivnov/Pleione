@@ -31,6 +31,10 @@
 			return Array.isArray(array) ? array.join(separator) : array;
 		}
 
+		_wrap(col) {
+			return col.match(/\W/) ? col.match(/\s/) ? `(${col})` : col : `"${col}"`;
+		}
+
 		query(query = null, values = null) {
 			if (query && (Array.isArray(query) || typeof (query) == 'object')) {
 				if (Array.isArray(query) && query.every(el => typeof (el) == 'string' && !el.includes(' ')))
@@ -174,7 +178,7 @@
 			let cols = this._object.select;
 
 			if (cols.length == 0)
-				return "*";
+				return '*';
 			else
 				return cols.map(obj => {
 					return Array.isArray(obj)
@@ -206,7 +210,7 @@
 								else if (typeof (val) == 'string' && !val.match(/\W/))
 									val = `"${val}"`;
 
-								return [ '$', '_' ].includes(key) ? val : `${val} AS ${key}`;
+								return [ '$', '_' ].includes(key) ? val : `${val} AS "${key}"`;
 							})/*.filter(el => el !== undefined)*/.join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				}).join(', ');
@@ -239,7 +243,7 @@
 								if (typeof (val) == 'string' && !val.match(/\W/))
 									val = `"${val}"`;
 
-								return [ '$', '_' ].includes(key) ? val : `${val} AS ${key}`;
+								return [ '$', '_' ].includes(key) ? val : `${val} AS "${key}"`;
 							}).join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				}).join(', ');
@@ -302,6 +306,7 @@
 
 			return vals.map(obj => {
 				return obj instanceof Object ? Object.keys(obj).map(key => {
+					let col = this._wrap(key);
 					let val = obj[key];
 
 					if (val === undefined)
@@ -319,7 +324,7 @@
 					else if (val instanceof Object)
 						val = `'${JSON.stringify(val).replace(/'/g, `''`)}'`;
 
-					return `${key}=${val}`;
+					return `${col}=${val}`;
 				}).join(', ') : obj;
 			}).join(', ');
 		}
@@ -351,6 +356,7 @@
 					return arg.length ? `(${this._where(arg)})` : null;
 				else if (arg instanceof Object)
 					return Object.keys(arg).filter(key => arg[key] !== undefined).map(key => {
+						let col = this._wrap(key);
 						var val = arg[key];
 
 						if (key == '$') {
@@ -366,13 +372,13 @@
 									? tmp.$
 									: tmp);
 
-							let isNull = arr.includes(null) ? ` OR ${key} IS NULL` : '';
-							return arr.length > 0 ? `(${key} IN (${arr.filter(el => el !== null).join(', ')})${isNull})` : 'FALSE';
+							let isNull = arr.includes(null) ? ` OR ${col} IS NULL` : '';
+							return arr.length > 0 ? `(${col} IN (${arr.filter(el => el !== null).join(', ')})${isNull})` : 'FALSE';
 						} else if (val instanceof Object) {
 							let keys = Object.keys(val);
 
 							if (keys.includes('$'))
-								return `${key} = (${this._where(val)})`;
+								return `${col} = (${this._where(val)})`;
 							else if (keys.includes('_'))
 								return `(${this._where(val._)})`;
 							else if (keys.includes('AND'))
@@ -382,7 +388,7 @@
 
 							let tmp = val instanceof QueryBuild ? val : new QueryBuild(this._log).query(null, val).build();
 
-							return `${key} ${val instanceof QueryBuild || val.limit != 1 || val.first != 1 || !val.exists || tmp ? 'IN' : '='} (${tmp})`;
+							return `${col} ${val instanceof QueryBuild || val.limit != 1 || val.first != 1 || !val.exists || tmp ? 'IN' : '='} (${tmp})`;
 						}
 
 					/*if (val === null)
@@ -394,7 +400,7 @@
 						else if (val instanceof QueryBuild)
 							val = `(${val.build()})`;
 
-						return val === null ? `${key} IS NULL` : `${key} ${val instanceof QueryBuild ? 'IN' : '='} ${val}`;
+						return val === null ? `${col} IS NULL` : `${col} ${val instanceof QueryBuild ? 'IN' : '='} ${val}`;
 					}).join(' AND ');
 				else
 					return arg;
@@ -446,7 +452,7 @@
 			if (!distinct)
 				return null;
 
-			return distinct.join(', ');
+			return distinct.map(this._wrap).join(', ');
 		}
 
 		order(...order) {
@@ -496,7 +502,7 @@
 		}
 
 		conflict(...conflict) {
-			this._object.conflict = conflict && conflict.every(el => el) ? conflict : null;
+			this._object.conflict = conflict && conflict.every(el => el) ? conflict.flatMap(el => Array.isArray(el) ? el : [ el ]) : null;
 
 			return this;
 		}
@@ -509,7 +515,7 @@
 			let columns = conflict.filter(el => typeof (el) == 'string' && !el.match(/\s/)).join(', ');
 			let where = conflict.filter(el => typeof (el) != 'string' || el.match(/\s/)).map(el => this._where(el)).join(' AND ');
 
-			return `ON CONFLICT (${columns})` + (where ? ` WHERE ${where}` : '');
+			return `ON CONFLICT` + (columns ? ` (${columns})` : '') + (where ? ` WHERE ${where}` : '');
 		}
 
 		count(col) {
@@ -653,7 +659,13 @@
 
 		build() {
 			if (this._object.query != null)
-				return this._object.query;
+				return Array.isArray(this._object.query)
+					? this._object.query.map(query => (query.build ? query.build() : query) || '').filter(query => query).join(';\n')
+						+ (this._object.query.reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
+					: this._object.query instanceof Object
+						? Object.values(this._object.query).map(query => (query.build ? query.build() : query) || '').filter(query => query).join(';\n')
+							+ (Object.values(this._object.query).reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
+						: this._object.query;
 
 			this._object.queryValues = null;
 
@@ -696,15 +708,7 @@
 					sql += ` RETURNING ${this._select()}`;
 
 				return sql;
-			} else if (this._object.update) {
-				let update = this._update();
-				if (!update.length)
-					return null;
-
-				sql = `UPDATE ${this._table()} SET ${update}`;
-			} else if (this._object.delete)
-				sql = `DELETE FROM ${this._table()}`;
-			else if (this._object.createDatabase)
+			} else if (this._object.createDatabase)
 				return `CREATE DATABASE ${this._object.createDatabase} OWNER ${this._object.owner || 'DEFAULT'}`;
 			else if (this._object.dropDatabase)
 				return `DROP DATABASE IF EXISTS ${this._object.dropDatabase}`;
@@ -720,7 +724,15 @@
 				return `ALTER TABLE ${this._table()} ${this._object.addColumn}`;
 			else if (this._object.dropColumn)
 				return `ALTER TABLE ${this._table()} ${this._object.dropColumn}`;
-			else {
+			else if (this._object.update) {
+				let update = this._update();
+				if (!update.length)
+					return null;
+
+				sql = `UPDATE ${this._table()} SET ${update}`;
+			} else if (this._object.delete) {
+				sql = `DELETE FROM ${this._table()}`;
+			} else {
 				sql = 'SELECT';
 
 				let distinct = this._distinct();
@@ -760,6 +772,13 @@
 				sql += ` LIMIT 1`;
 			if (this._object.offset)
 				sql += ` OFFSET ${this._object.offset}`;
+
+			if (this._object.update || this._object.delete) {
+				if (this._object.return)
+					sql += ` RETURNING ${this._return()}`;
+				else if (this._object.select)
+					sql += ` RETURNING ${this._select()}`;
+			}
 
 			if (Array.isArray(this._object.table))
 				this._object.table.forEach((table, index) => {
