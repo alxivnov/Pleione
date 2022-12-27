@@ -42,7 +42,7 @@
 				else
 					this._object.query = query;//'BEGIN;\n' + query.map(obj => (obj instanceof QueryBuild ? obj : new QueryBuild(this._log).query(obj, values)).build()).join('; ') + ';\nCOMMIT';
 				this._object.queryValues = values;
-			} else if (query && query.includes(' ')) {
+			} else if (query && (query.includes(' ') || query.includes(';'))) {
 				this._object.query = query;
 				this._object.queryValues = values;
 			} else if (values && values instanceof Object) {
@@ -660,10 +660,22 @@
 		build() {
 			if (this._object.query != null)
 				return Array.isArray(this._object.query)
-					? this._object.query.map(query => (query.build ? query.build() : query) || '').filter(query => query).join(';\n')
+					? this._object.query
+						.map(query => typeof (query) == 'function' ? query() : query)
+//						.filter(query => query)
+						.map(query => query && query.build ? query.build() : query)
+						.map(query => query || 'SELECT * FROM (VALUES (0)) t (c) WHERE c > 0')
+//						.filter(query => query)
+						.join(';\n')
 						+ (this._object.query.reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
 					: this._object.query instanceof Object
-						? Object.values(this._object.query).map(query => (query.build ? query.build() : query) || '').filter(query => query).join(';\n')
+						? Object.values(this._object.query)
+							.map(query => typeof (query) == 'function' ? query() : query)
+//							.filter(query => query)
+							.map(query => query && query.build ? query.build() : query)
+							.map(query => query || 'SELECT * FROM (VALUES (0)) t (c) WHERE c > 0')
+//							.filter(query => query)
+							.join(';\n')
 							+ (Object.values(this._object.query).reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
 						: this._object.query;
 

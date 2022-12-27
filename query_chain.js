@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 
 module.exports = class QueryChain extends QueryBuild {
-	constructor(db = null, opt = null) {
+	constructor(db = null, opt = null, obj = null) {
 		super(opt && opt.log || opt);
 
 		this._db = db;
@@ -11,6 +11,8 @@ module.exports = class QueryChain extends QueryBuild {
 		this._msg = opt && opt.msg;
 
 		this._enc = opt && opt.enc;
+
+		this._object = obj || {};
 	}
 
 	_alias(el) {
@@ -171,7 +173,7 @@ module.exports = class QueryChain extends QueryBuild {
 				if (table)
 					this.table(table.split('|').map(this._alias));
 
-				if (req.method == 'POST') {
+				if (req.method == 'POST' && (param || req.body)) {
 					if (/*!isNaN(id) && id > 0*/ids.length && ids.every(id => id > 0))		// UPDATE BY ID
 						this.update(req.body).where({ [key]: /*id*/ids });
 					else if (param == '*')													// UPDATE WHERE
@@ -216,23 +218,20 @@ module.exports = class QueryChain extends QueryBuild {
 								.distinct(req.body.distinct);
 							this._object.query = {
 								doc: sql,
-								len: () => {
-//
-//									console.log('body', req.body);
-									return req.body.count || req.body.len
-										? req.body.group
-											? new QueryChain(null, log)
-												.table({ query: sql.limit().offset() })
-												.select({ $: 'count', count: 'COUNT(*)' })
-											: new QueryChain(null, log)
-												.table(this._object.table)
-												.select({ $: 'count', count: 'COUNT(*)' })
-												.join(req.body.join)
-												.where({ ...req.query, ...req.body.where })
-//												.group(...group)
+								len: req.body.count || req.body.len
+									? req.body.group
+										? new QueryChain(null, log)
+											.table({ query: new QueryChain(null, log, { ...sql._object }).limit().offset() })
+											.select({ $: 'count', count: 'COUNT(*)' })
 											.limit(0)
-										: null;
-								}
+										: new QueryChain(null, log)
+											.table(this._object.table)
+											.select({ $: 'count', count: 'COUNT(*)' })
+											.join(req.body.join)
+											.where({ ...req.query, ...req.body.where })
+//											.group(...group)
+											.limit(0)
+									: null
 							};
 						} else {
 							this._object.query = Array.isArray(req.body)
@@ -399,9 +398,9 @@ module.exports = class QueryChain extends QueryBuild {
 		}
 
 		if (Array.isArray(this._object.query)
-			? this._object.query.some(el => typeof (el) == 'function')
+			? this._object.query.some(el => typeof (el) == 'function' && el.length > 0 || el instanceof QueryBuild && el._object.createDatabase)
 			: this._object.query instanceof Object
-				? Object.values(this._object.query).some(el => typeof (el) == 'function')
+				? Object.values(this._object.query).some(el => typeof (el) == 'function' && el.length > 0 || el instanceof QueryBuild && el._object.createDatabase)
 				: false)
 			return this.batch(callback, db);
 
@@ -426,8 +425,15 @@ module.exports = class QueryChain extends QueryBuild {
 					if (Array.isArray(doc)) {
 						doc = doc.map((res, i) => {
 							if (res.fields && res.fields.length) {
-								let queries = Array.isArray(this._object.query) ? this._object.query : this._object.query instanceof Object ? Object.values(this._object.query) : [];
-								let query = queries.length > i && queries[i] && queries[i]._convertRes ? queries[i] : this;
+								let queries = (Array.isArray(this._object.query) ? this._object.query : this._object.query instanceof Object ? Object.values(this._object.query) : [])
+									.map(query => typeof (query) == 'function' ? query() : query);
+								let query = queries.length > i
+									? queries[i]
+										? queries[i]._convertRes
+											? queries[i]
+											: this
+										: { _convertRes: () => undefined }
+									: this;
 								return query._convertRes(res);
 							} else {
 								return res.rowCount;
@@ -440,6 +446,14 @@ module.exports = class QueryChain extends QueryBuild {
 									prev[curr] = doc[index];
 								return prev;
 							}, {});
+					} else if (this._object.query instanceof Object && !Array.isArray(this._object.query)) {
+						let key = Object.keys(this._object.query)[0];
+						let query = this._object.query[key]
+							? this._object.query[key]._convertRes
+								? this._object.query[key]
+								: this
+							: { _convertRes: () => undefined };
+						doc = { [key]: query._convertRes(doc) };
 					} else if (doc.fields && doc.fields.length) {
 						doc = this._convertRes(doc);
 					} else {
@@ -448,9 +462,9 @@ module.exports = class QueryChain extends QueryBuild {
 
 				if (this._log.err && err) {
 					if (!this._log.sql)
-						console.log('SQL', sql);
+						console.log('SQL', sql.length > 64 ? sql.substring(0, 100) + '...' : sql);
 
-					console.log('ERR', err.toString());
+					console.error('ERR', err.toString());
 				} else if (this._log.doc) {
 					console.log('DOC', doc);
 				}
