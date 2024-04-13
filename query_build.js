@@ -9,10 +9,16 @@
 
 	const QueryChain = e && e.QueryChain || require('./query_chain.js');
 
-	const RESERVED_KEYS = ['$', '_'];
+	const RESERVED_KEYS = new Set(['$', '_']);
+	// https://www.postgresql.org/docs/current/functions-comparison.html
+	const COMPARISON = new Set(['>', '<', '>=', '<=', '=', '<>', '!=']);
+	// https://www.postgresql.org/docs/current/functions-matching.html
+	const MATCHING = new Set(['LIKE', 'ILIKE']);
 
 	// Build an SQL query out of chained commands.
 	return class QueryBuild extends QueryChain {
+		static RESERVED_KEYS = RESERVED_KEYS;
+
 		_wrap(col, braces) {
 			return col.match(/\W/) ? braces && col.match(/\s/) ? `(${col})` : col : `"${col}"`;
 		}
@@ -97,46 +103,52 @@
 			else
 				return cols.map(obj => {
 					return Array.isArray(obj)
-						? obj.map(val => {
-							if (val instanceof QueryBuild)
-								val = `(${val.build()})`;
-//							else if (Array.isArray(val))
-//								val = `COALESCE(${val.join(', ')})`;
-							else if (val instanceof Object)
-								val = val.table
-									? `(${this._clone().query(undefined, val).table(val.table).build()})`
-									: Object.keys(val).map(key => `${val[key]} AS ${key}`).join(', ');
-							else if (typeof (val) == 'string' && !val.match(/\W/))
-								val = `"${val}"`;
+						? obj
+							.filter(val => val !== undefined)
+							.map(val => {
+								if (val instanceof QueryBuild)
+									val = `(${val.build()})`;
+	//							else if (Array.isArray(val))
+	//								val = `COALESCE(${val.join(', ')})`;
+								else if (val instanceof Object)
+									val = val.table
+										? `(${this._clone().query(undefined, val).table(val.table).build()})`
+										: Object.keys(val).map(key => `${val[key] instanceof Object && (val[key].$ || val[key]._) || val[key]} AS "${key}"`).join(', ');
+								else if (typeof (val) == 'string' && !val.match(/\W/))
+									val = `"${val}"`;
 
-							return `${val}`;
-						})
+								return `${val}`;
+							})
 							// .filter(val => !val.match(/INSERT\s+INTO\s+\w+\s+|DELETE\s+FROM\s+(ONLY\s+)*\w+\s+|UPDATE\s+(ONLY\s+)*\w+\s+/))
 							.join(', ')
 						: obj instanceof Object
-							? Object.keys(obj).filter(key => /*key != '_' &&*/ !(RESERVED_KEYS.includes(key) && obj[obj[key]] !== undefined)).map(key => {
-								let val = obj[key];
+							? Object.keys(obj)
+								.filter(key => /*key != '_' &&*/ !(RESERVED_KEYS.has(key) && obj[obj[key]] !== undefined))
+								.filter(key => obj[key] !== undefined)
+								.map(key => {
+									let val = obj[key];
 
 //							if (key == '$' && obj[val] !== undefined)
 //								return undefined;
 
-								if (val instanceof QueryBuild)
-									val = `(${val.build()})`;
-								else if (Array.isArray(val))
-									val = RESERVED_KEYS.includes(key)
-										? val.join(', ')
-										: `COALESCE(${val.join(', ')})`;
-								else if (val instanceof Object)
-									val = /*Object.keys(val).every(key => key == '$')
-									? val.$
-									:*/ val.table
-											? `(${this._clone().query(undefined, val).table(val.table).build()})`
-											: this._case(val);//Object.keys(val).map(key => `${val[key]} AS ${key}`).join(', ');
-								else if (typeof (val) == 'string' && !val.match(/\W/))
-									val = `"${val}"`;
+									if (val instanceof QueryBuild)
+										val = `(${val.build()})`;
+									else if (Array.isArray(val))
+										val = RESERVED_KEYS.has(key)
+											? val.join(', ')
+											: `COALESCE(${val.join(', ')})`;
+									else if (val instanceof Object)
+										val = /*Object.keys(val).every(key => key == '$')
+										? val.$
+										:*/ val.table
+												? `(${this._clone().query(undefined, val).table(val.table).build()})`
+												: (val.$ || val._) || this._case(val);//Object.keys(val).map(key => `${val[key]} AS ${key}`).join(', ');
+									else if (typeof (val) == 'string' && !val.match(/\W/))
+										val = `"${val}"`;
 
-								return RESERVED_KEYS.includes(key) ? val : `${val} AS "${key}"`;
-							})/*.filter(el => el !== undefined)*/.join(', ')
+									return RESERVED_KEYS.has(key) ? val : `${val} AS "${key}"`;
+								})
+								.join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				})
 					// .filter(val => !val.match(/INSERT\s+INTO\s+\w+\s+|DELETE\s+FROM\s+(ONLY\s+)*\w+\s+|UPDATE\s+(ONLY\s+)*\w+\s+/))
@@ -151,21 +163,31 @@
 			else
 				return cols.map(obj => {
 					return Array.isArray(obj)
-						? obj.map(val => {
-							if (typeof (val) == 'string' && !val.match(/\W/))
-								val = `"${val}"`;
-
-							return `${val}`;
-						}).join(', ')
-						: obj instanceof Object
-							? Object.keys(obj).filter(key => /*key != '_' &&*/ !(RESERVED_KEYS.includes(key) && obj[obj[key]] !== undefined)).map(key => {
-								let val = obj[key];
-
+						? obj
+							.filter(val => val !== undefined)
+							.map(val => {
 								if (typeof (val) == 'string' && !val.match(/\W/))
 									val = `"${val}"`;
+								else if (val instanceof Object)
+									val = val.$ || val._ || val;
 
-								return RESERVED_KEYS.includes(key) ? val : `${val} AS "${key}"`;
+								return `${val}`;
 							}).join(', ')
+						: obj instanceof Object
+							? Object.keys(obj)
+								.filter(key => /*key != '_' &&*/ !(RESERVED_KEYS.has(key) && obj[obj[key]] !== undefined))
+								.filter(key => obj[key] !== undefined)
+								.map(key => {
+									let val = obj[key];
+
+									if (typeof (val) == 'string' && !val.match(/\W/))
+										val = `"${val}"`;
+									else if (val instanceof Object)
+										val = val.$ || val._ || val;
+
+									return RESERVED_KEYS.has(key) ? val : `${val} AS "${key}"`;
+								})
+								.join(', ')
 							: typeof (obj) == 'string' && !obj.match(/\W/) ? `"${obj}"` : obj;
 				}).join(', ');
 		}
@@ -302,8 +324,10 @@
 							return `NOT (${this._where(val)})`;
 						} else if (key == 'EXISTS') {
 							return `EXISTS (${val})`;
+						} else if (val instanceof Date) {
+							val = val.toISOString();
 						} else if (Array.isArray(val)) {
-							let arr = val.map(tmp => typeof (tmp) == 'string' && tmp != 'NOW()' && !tmp.match(/^\$\d+\./)
+							let arr = val.map(tmp => typeof (tmp) == 'string'/* && tmp != 'NOW()' && !tmp.match(/^\$\d+\./)*/
 								? `'${tmp.replace(/\'/g, '\'\'').replace(/\0/g, '')}'`
 								: tmp instanceof Object && Object.keys(tmp).includes('$')
 									? tmp.$
@@ -324,20 +348,24 @@
 								return `(${this._where(val.OR, 'OR')})`;
 							else if (keys.includes('NOT'))
 								return val.NOT === null ? `${col} IS NOT NULL` : `NOT (${this._where(val.NOT)})`;
-							else if (keys.some(key => ['>', '<', '>=', '<=', '=', '<>', '!='].includes(key)))
+							else if (keys.some(key => COMPARISON.has(key)))
 								return keys.map(key => {
 									let sub = val[key];
 
-									if (sub instanceof Object) {
+									if (sub instanceof Date) {
+										sub = `'${sub.toISOString()}'`;
+									} else if (sub instanceof Object) {
 										let exp = sub.ANY ? 'ANY' : sub.ALL ? 'ALL' : undefined;
 										let query = exp ? sub[exp] : sub;
 										let tmp = query instanceof QueryBuild ? query : this._clone().query(null, query);
 										sub = exp ? `${exp} (${tmp})` : `(${tmp})`;
+									// } else if (typeof (sub) == 'string' && val != 'NOW()' && !sub.match(/^\$\d+\./)) {
+									// 	sub = `'${sub.replace(/\'/g, '\'\'').replace(/\0/g, '')}'`;
 									}
 
 									return `${col} ${key} ${sub}`;
 								}).join(' AND ');
-							else if (keys.some(key => ['LIKE', 'ILIKE'].includes(key)))
+							else if (keys.some(key => MATCHING.has(key)))
 								return keys.map(key => `${col} ${key} '${val[key]}'`).join(' AND ');
 
 							let tmp = val instanceof QueryBuild ? val : this._clone().query(null, val);
@@ -348,7 +376,7 @@
 
 					/*if (val === null)
 						val = 'NULL';
-					else */if (typeof (val) == 'string' && val != 'NOW()' && !val.match(/^\$\d+\./))
+					else */if (typeof (val) == 'string'/* && val != 'NOW()' && !val.match(/^\$\d+\./)*/)
 							val = `'${val.replace(/\'/g, '\'\'').replace(/\0/g, '')}'`;
 						else if (val instanceof Object && Object.keys(val).includes('$'))
 							val = `(${this._where(val)})`;
@@ -395,6 +423,7 @@
 			if (!order)
 				return null;
 
+			let SORT_DIRECTION_TYPES = new Set(['number', 'boolean']);
 			let args = order.map(arg => {
 				if (arg instanceof Object)
 					return Object.keys(arg).map(key => {
@@ -403,7 +432,7 @@
 						if (typeof (key) == 'string' && !key.match(/\W/))
 							key = `"${key}"`;
 
-						if (['number', 'boolean'].includes(typeof (val)))
+						if (SORT_DIRECTION_TYPES.has(typeof (val)))
 							val = val > 0 ? 'ASC' : 'DESC';
 
 						return `${key} ${val}`;
@@ -458,6 +487,8 @@
 
 							if (typeof (val) == 'string' && !val.match(/\W/))
 								val = `"${val}"`;
+							else if (val instanceof Object)
+								val = val.$ || val._ || val;
 
 							return key == '$' ? val : `${val} AS ${key}`;
 						}).join(', ')
@@ -469,26 +500,26 @@
 		}
 
 		build() {
-			if (this._object.query != null)
-				return Array.isArray(this._object.query)
-					? this._object.query
+			if (this._object.query != null) {
+				let flatten = (queries) => queries
 						.map(query => typeof (query) == 'function' ? query.call(this) : query)
 //						.filter(query => query)
+						// .flatMap(query => Array.isArray(query)
+						// 	? flatten(query)
+						// 	: query instanceof QueryBuild && Array.isArray(query._object.query)
+						// 		? flatten(query._object.query)
+						// 		: [query])
 						.map(query => query && query.build ? query.build() : query)
 						.map(query => query || 'SELECT NULL AS __null__ WHERE FALSE')
 //						.filter(query => query)
 						.join(';\n')
-						+ (this._object.query.reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
+						+ (queries.reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';');
+				return Array.isArray(this._object.query)
+					? flatten(this._object.query)
 					: this._object.query instanceof Object
-						? Object.values(this._object.query)
-							.map(query => typeof (query) == 'function' ? query.call(this) : query)
-//							.filter(query => query)
-							.map(query => query && query.build ? query.build() : query)
-							.map(query => query || 'SELECT NULL AS __null__ WHERE FALSE')
-//							.filter(query => query)
-							.join(';\n')
-							+ (Object.values(this._object.query).reduce((count, query) => count + (query && query._object ? query._object.query == 'BEGIN' ? 1 : query._object.query == 'COMMIT' ? - 1 : 0 : 0), 0) ? ';\nCOMMIT;' : ';')
+						? flatten(Object.values(this._object.query))
 						: this._object.query;
+			}
 
 			this._object.queryValues = null;
 
@@ -510,7 +541,7 @@
 					let set = update
 						? !update.length || typeof (update[0]) == 'function'
 							? columns.filter(col => !this._object.conflict.includes(col))
-							: update.every(el => typeof (el) == 'string')
+							: update.every(el => typeof (el) == 'string' && !el.match(/\W/))
 								? update
 								: undefined
 						: undefined;

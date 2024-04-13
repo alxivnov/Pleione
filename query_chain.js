@@ -3,7 +3,7 @@
 		? module.exports = t()
 		: typeof define == 'function' && define.amd
 			? define(t)
-			: e.QueryChain = t(e)
+			: e.QueryChain = t()
 })(this, function () {
 	"use strict";
 
@@ -92,6 +92,8 @@
 				if (values.first)
 					clone = clone.limit(0);
 
+				if (values.having)
+					clone = this._spreadIfArray(this.having.bind(clone), values.having);
 				if (values.exists)
 					clone = clone.exists();
 			} else {
@@ -125,21 +127,21 @@
 
 		select(...cols) {
 			let clone = this._clone(true);
-			clone._object.select = cols && cols.every(el => el) ? cols : [];
+			clone._object.select = cols /*&& cols.every(el => el)*/ ? cols.filter(el => el !== undefined) : [];
 
 			return clone;
 		}
 
 		return(...cols) {
 			let clone = this._clone(true);
-			clone._object.return = cols && cols.every(el => el) ? cols : [];
+			clone._object.return = cols /*&& cols.every(el => el)*/ ? cols.filter(el => el !== undefined) : [];
 
 			return clone;
 		}
 
 		insert(...rows) {
 			let clone = this._clone(true);
-			clone._object.insert = rows && rows.every(el => el) ? rows : null;
+			clone._object.insert = rows && rows.every(el => el) ? rows.flatMap(el => Array.isArray(el) ? el : [el]) : null;
 
 			return clone;
 		}

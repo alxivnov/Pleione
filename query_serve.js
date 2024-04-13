@@ -38,11 +38,11 @@ module.exports = class QueryServe extends QueryBatch {
 			let val = values._;
 			let json = val && val.includes('json');
 
-			let table = values.table || req.params.table;
+			let table = values.table || req.params.table || clone._object.table;
 			let param = values.id || values[key] || req.params.id || req.params[key];// || req.params[0];
-			// console.log('key:', key, 'val:', val, 'table:', table, 'param:', param, 'values:', values, 'req.params:', req.params);
+			// console.log('key:', key, 'val:', val, 'table:', table, 'param:', param, 'values:', values, 'req.params:', req.params, 'req.method:', req.method);
 			if (val) {
-				let other = Object.keys(values).filter(el => ![ '$', '_' ].includes(el)).reduce((prev, curr) => {
+				let other = Object.keys(values).filter(el => !QueryServe.RESERVED_KEYS.has(el)).reduce((prev, curr) => {
 					prev[curr] = values[curr];
 
 					return prev;
@@ -66,45 +66,50 @@ module.exports = class QueryServe extends QueryBatch {
 
 						let del = columns.filter(el => req.body[el] == null);
 						let ins = columns.filter(el => req.body[el] != null);
-						clone = clone.query([
+						clone = clone.query({
 //							this._clone(instance).begin(),
 
-							function () {
-								return del.length
-									? clone._clone()
+							...(del.length
+								? {
+									del: clone._clone()
 										.table(table || this._object.table)
 										.delete()
 										.where({ ...other, [key]: del })
-									: null
-							},
-							function () {
-								return ins.length
-									? clone._clone()
+								}
+								: {}
+							),
+							...(ins.length
+								? {
+									ins: clone._clone()
 										.table(table || this._object.table)
 										.insert(...ins.map(el => {
 											return { ...other, [key]: el, [val]: json ? JSON.stringify(req.body[el]).replace(/'/g, `''`) : req.body[el] };
 										}))
 										.conflict(...Object.keys(other), key)
 										.update({ [val]: { $: `excluded.${val}` } })
-									: null
-							}
-						]);
+								}
+								: {}),
+
+						});
 					}
 				} else {
 					if (param) {
 						let settings = Array.isArray(param) ? param : param.split('|');
 
 						if (settings.length > 1)
-							clone = clone.select({ $: key, _: val }, val).where({ ...other, [key]: settings });
+							clone = clone.select({ $: key, _: val }/*, val*/).where({ ...other, [key]: settings });
 						else
 							clone = clone.select({ $: val }).where({ ...other, [key]: param }).limit(0);
 					} else {
-						clone = clone.select({ $: key, _: val }, val).where(other);
+						clone = clone.select({ $: key, _: val }/*, val*/).where(other);
 					}
 				}
 			} else {
 //				let id = parseInt(param);
-				let ids = param && (Array.isArray(param) ? param : param.split('|')).map(id => parseInt(id)).filter(id => !isNaN(id)) || [];
+				let uuid = /^-?[\da-fA-F]{8}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{4}-[\da-fA-F]{12}$/;
+				let ids = param && (Array.isArray(param) ? param : param.split('|'))
+					.map(id => uuid.test(id) ? id : parseInt(id))
+					.filter(id => typeof (id) == 'string' || !isNaN(id)) || [];
 
 				if (table) {
 					let tables = table.split('|').map(clone._alias);
@@ -117,12 +122,12 @@ module.exports = class QueryServe extends QueryBatch {
 				}
 
 				if (req.method == 'POST' && (param || req.body)) {
-					if (/*!isNaN(id) && id > 0*/ids.length && ids.every(id => id > 0))		// UPDATE BY ID
+					if (/*!isNaN(id) && id > 0*/ids.length && ids.every(id => typeof (id) == 'string' ? !id.startsWith('-') : id > 0))		// UPDATE BY ID
 						clone = clone.update(req.body).where({ [key]: /*id*/ids });
 					else if (param == '*')													// UPDATE WHERE
 						clone = clone.update(req.body.update).where({ ...req.query, ...(Array.isArray(req.body.where) || typeof (req.body.where) == 'string' ? { OR: req.body.where } : req.body.where) });
-					else if (/*!isNaN(id) && id < 0*/ids.length && ids.every(id => id < 0))	// DELETE BY ID
-						clone = clone.delete().where({ [key]: /*Math.abs(id)*/ids.map(id => Math.abs(id)) });
+					else if (/*!isNaN(id) && id < 0*/ids.length && ids.every(id => typeof (id) == 'string' ? id.startsWith('-') : id < 0))	// DELETE BY ID
+						clone = clone.delete().where({ [key]: /*Math.abs(id)*/ids.map(id => typeof (id) == 'string' ? id.substring(1) : Math.abs(id)) });
 					else if (param == '-')													// DELETE WHERE
 						clone = clone.delete().where({ ...req.query, ...(Array.isArray(req.body.where) || typeof (req.body.where) == 'string' ? { OR: req.body.where } : req.body.where) });
 					else if (param)															// INSERT: +, 0
@@ -223,6 +228,12 @@ module.exports = class QueryServe extends QueryBatch {
 
 			if (req.headers['accept'] && req.headers['accept'].includes('application/jsont'))
 				clone._opt.jsont = true;
+			if (req.body)
+				clone._opt.res = {
+					len: req.body.len,
+					sec: req.body.sec,
+					sql: req.body.sql,
+				};
 		} else {
 			clone = super.query(query, values);
 		}
@@ -257,7 +268,7 @@ module.exports = class QueryServe extends QueryBatch {
 			let isArray = Array.isArray(this._object.query);
 			let isObject = this._object.query instanceof Object && !isArray;
 
-			let fn = (err, doc, len, _sql, res) => {
+			let fn = (err, doc, len, sql, sec, res) => {
 				if (err === undefined && doc === undefined) {
 					callback.end();
 				} else if (options.jsont) {
@@ -274,6 +285,10 @@ module.exports = class QueryServe extends QueryBatch {
 						callback.setHeader('X-Count', doc.length);
 						if (len != undefined)
 							callback.setHeader('X-Total', len);
+						if (options.res && options.res.sec)
+							callback.setHeader('x-sec', sec);
+						if (options.res && options.res.sql)
+							callback.setHeader('x-sql', sql);
 						callback.write('[\n');
 						callback.write(JSON.stringify(res.fields.map(field => field.name)));
 						doc.forEach((row, i) => {
@@ -291,7 +306,12 @@ module.exports = class QueryServe extends QueryBatch {
 									? doc
 									: { doc }
 								// $doc, $len
-								: { doc, len }),
+								: {
+									doc,
+									len,
+									sec: options.res && options.res.sec ? sec : undefined,
+									sql: options.res && options.res.sql ? sql : undefined
+								}),
 
 							err: err
 								? (!!options.msg || err)

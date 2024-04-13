@@ -71,26 +71,35 @@ module.exports = class QueryBatch extends QueryQuery {
 		let isArray = Array.isArray(this._object.query);
 		let isObject = this._object.query instanceof Object && !isArray;
 
+		let hasArray = (queries) => queries.some(el => typeof (el) == 'function' && (el.length > 0 || Array.isArray(el())) || Array.isArray(el) || el instanceof QueryQuery && (el._object.createDatabase || el._object.dropDatabase || el._object.query == 'BEGIN'));
 		if ((isArray || isObject) && (options.forceQueuing || options.ignoreErrors) || (isArray
-			? this._object.query.some(el => typeof (el) == 'function' && el.length > 0 || el instanceof QueryQuery && (el._object.createDatabase || el._object.dropDatabase || el._object.query == 'BEGIN'))
+			? hasArray(this._object.query)
 			: isObject
-				? Object.values(this._object.query).some(el => typeof (el) == 'function' && el.length > 0 || el instanceof QueryQuery && (el._object.createDatabase || el._object.dropDatabase || el._object.query == 'BEGIN'))
+				? hasArray(Object.values(this._object.query))
 				: false))
 			return this.batch(callback, options);
 
 		return super.fetch(callback, options);
 	}
 
+	_assignKeys(docs) {
+		return Object.assign(docs, Object.keys(this._object.query).reduce((prev, curr, index) => {
+			if (docs.length > index)
+				prev[curr] = docs[index];
+			return prev;
+		}, {}));
+	}
+
 	batch(callback, options) {
 		options = this._merge(options, this._opt);
 
 		let client = options.db;
-		client.connect((err, client, done) => {
-			let isArray = Array.isArray(this._object.query);
-			let isObject = this._object.query instanceof Object && !isArray;
+		let isArray = Array.isArray(this._object.query);
+		let isObject = this._object.query instanceof Object && !isArray;
+		let connect = (err, client, done) => {
 			var tran = 0;
 
-			const exit = (errs, docs, lens, sqls, ress) => {
+			const exit = (errs, docs, lens, sqls, secs, ress) => {
 				// if (typeof (client.end) == 'function')
 				// 	client.end();
 
@@ -112,40 +121,36 @@ module.exports = class QueryBatch extends QueryQuery {
 				if (callback)
 					/*(Array.isArray(callback) ? callback : [callback]).forEach(callback =>*/ {
 						if (isObject)
-							docs = Object.keys(this._object.query).reduce((prev, curr, index) => {
-								if (docs.length > index)
-									prev[curr] = docs[index];
-								return prev;
-							}, {});
+							docs = this._assignKeys(docs);
 
 						/*if (typeof (callback.send) == 'function')
 							callback.send(isObject
 								? { ...docs, err: err ? (!!options.msg || err) : undefined, msg: err ? (options.msg || err.toString()) : undefined }
 								: { doc: docs, len: lens, err: err ? (!!options.msg || err) : undefined, msg: err ? (options.msg || err.toString()) : undefined });
 						else*/ if (isObject && docs.$doc !== undefined && docs.$len !== undefined)
-							callback(err, docs.$doc, docs.$len, sqls, ress);
+							callback(err, docs.$doc, docs.$len, sqls, secs, ress);
 						else
-							callback(err, docs, lens, sqls, ress);
+							callback(err, docs, lens, sqls, secs, ress);
 					}/*);*/
 			};
 
-			const next = (errs, docs, lens, sqls, ress, idx) => {
+			const next = (errs, docs, lens, sqls, secs, ress, idx) => {
 				let arr = isArray ? this._object.query : /*isObject ?*/ Object.values(this._object.query) /*: []*/;
 
 				if (errs && !Array.isArray(errs)) {
 					if (tran)
 						this._clone(options).rollback().fetch(() => {
-							exit(errs, docs, lens, sqls, ress);
+							exit(errs, docs, lens, sqls, secs, ress);
 						}, { ...options, count: undefined, db: client });
 					else
-						exit(errs, docs, lens, sqls, ress);
+						exit(errs, docs, lens, sqls, secs, ress);
 				} else if (idx < arr.length) {
 					let obj = arr[idx];
 
 					// console.log('batch next', idx, isObject ? Object.keys(this._object.query)[idx] : undefined);
 					let promise = new Promise((resolve, reject) => {
 						try {
-							resolve(typeof (obj) == 'function' ? obj.call(this, docs, /*lens, */errs, sqls) : obj);
+							resolve(typeof (obj) == 'function' ? obj.call(this, this._assignKeys([...docs]), /*lens, */errs, sqls) : obj);
 						} catch (err) {
 							reject(err);
 						}
@@ -154,7 +159,8 @@ module.exports = class QueryBatch extends QueryQuery {
 					promise.then(obj => {
 						if (obj) {
 							let query = obj instanceof QueryQuery ? obj : this._clone(options).query(obj, this._object.queryValues);
-							query.fetch((err, doc, len, sql, res) => {
+							// console.log('fetch', typeof (obj), Array.isArray(obj) && obj.length, obj instanceof QueryQuery && obj._opt.db._connectionString, options.db._connectionString);
+							query.fetch((err, doc, len, sql, sec, res) => {
 								// console.log('batch fetch', idx, isObject ? Object.keys(this._object.query)[idx] : undefined, err);
 								if (query._object.query == 'BEGIN')
 									tran++;
@@ -169,9 +175,10 @@ module.exports = class QueryBatch extends QueryQuery {
 								docs.push(doc);
 								lens.push(len);
 								sqls.push(sql);
+								secs.push(sec);
 								ress.push(res);
 
-								next(errs, docs, lens, sqls, ress, idx + 1);
+								next(errs, docs, lens, sqls, secs, ress, idx + 1);
 							}, { ...options, count: undefined, db: client });
 						} else {
 							if (Array.isArray(errs))
@@ -182,9 +189,10 @@ module.exports = class QueryBatch extends QueryQuery {
 							docs.push(null);
 							lens.push(null);
 							sqls.push(null);
+							secs.push(null);
 							ress.push(null);
 
-							next(errs, docs, lens, sqls, ress, idx + 1);
+							next(errs, docs, lens, sqls, secs, ress, idx + 1);
 						}
 					}).catch(err => {
 						if (Array.isArray(errs))
@@ -195,8 +203,9 @@ module.exports = class QueryBatch extends QueryQuery {
 						docs.push(null);
 						lens.push(null);
 						sqls.push(null);
+						secs.push(null);
 						ress.push(null);
-						next(errs, docs, lens, sqls, ress, idx + 1);
+						next(errs, docs, lens, sqls, secs, ress, idx + 1);
 					});
 				} else {
 					if (tran)
@@ -206,17 +215,25 @@ module.exports = class QueryBatch extends QueryQuery {
 							else
 								errs = err;
 
-							exit(errs, docs, lens, sqls, ress);
+							exit(errs, docs, lens, sqls, secs, ress);
 						}, { ...options, count: undefined, db: client });
 					else
-						exit(errs, docs, lens, sqls, ress);
+						exit(errs, docs, lens, sqls, secs, ress);
 				}
 			};
 
 //			this._clone(options).begin().fetch(err => {
-				next(options.ignoreErrors ? [ ] : null/*err*/, [ ], [ ], [ ], [ ], 0);
+				next(options.ignoreErrors ? [ ] : null/*err*/, [ ], [ ], [ ], [ ], [ ], 0);
 //			}, , { db: client });
-		});
+		};
+		let queries = isArray ? this._object.query : isObject ? Object.values(this._object.query) : [];
+		let isBegin = (sql) => typeof (sql) == 'string' && (sql == 'BEGIN' || sql.includes('BEGIN;'));
+		let tx = queries.some(el => el instanceof QueryQuery && (el._object.createDatabase || el._object.dropDatabase || isBegin(el._object.query))
+			|| isBegin(el));
+		if (tx)
+			client.connect(connect);
+		else
+			connect(null, client, () => { });
 	}
 
 	// begin(queries) {

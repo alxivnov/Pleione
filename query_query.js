@@ -5,6 +5,52 @@ const fs = require('fs');
 
 const QueryBuild = require('./query_build.js');
 
+const excl = [
+	'backoff',
+	'max_lifetime',
+	'onnotice',
+	'onnotify',
+	'onclose',
+	'onparameter',
+	'parsers',
+	'pass',
+	'password',
+	'serializers',
+	'shared',
+	'transform',
+];
+const excludeProperties = (from, ...props) => {
+	if (!from)
+		return {};
+
+	let excl = new Set(props.flatMap(prop => Array.isArray(prop) ? prop : [prop]));
+	let to = Object.getOwnPropertyNames(from)
+		.filter(prop => !excl.has(prop))
+		.reduce((to, prop) => {
+			to[prop] = from[prop];
+			return to;
+		}, {});
+	return to;
+};
+const toTable = (obj, prefix) => {
+	return Object.keys(obj).flatMap(key => {
+		return typeof (obj[key]) == 'object' && obj[key] !== null && !Array.isArray(obj[key])
+			? toTable(obj[key], `${prefix || ''}${key}.`)
+			: [{ $: `${prefix || ''}${key}`, _: obj[key] }];
+	});
+};
+const logArgs = (arr) => {
+	let max = arr.reduce((prev, curr) => Math.max(prev, curr.$.length), 0);
+	return arr.reduce((prev, curr) => [
+		...prev,
+		prev.length ? '\r\n' : '',
+		curr.$,
+		': ',
+		' '.repeat(max - curr.$.length),
+		typeof (curr._) == 'function' ? curr._.name ? `[Function: ${curr._.name}]` : '[Function]' : curr._,
+	], []);
+};
+
 // Queries DB with chained commands.
 // Processes result according to S_.
 // Encrypts/decrypts results.
@@ -14,6 +60,8 @@ module.exports = class QueryQuery extends QueryBuild {
 			doc: false,
 			err: false,
 			obj: false,
+			opt: false,
+			res: false,
 			sql: false
 		};
 		if (opt) {
@@ -22,6 +70,8 @@ module.exports = class QueryQuery extends QueryBuild {
 					doc: opt.log.includes('doc'),
 					err: opt.log.includes('err'),
 					obj: opt.log.includes('obj'),
+					opt: opt.log.includes('opt'),
+					res: opt.log.includes('res'),
 					sql: opt.log.includes('sql')
 				};
 			else if (typeof (opt.log) == 'object')
@@ -94,30 +144,33 @@ module.exports = class QueryQuery extends QueryBuild {
 		let cipherFunc = typeof (options.enc) == 'function';
 
 		let fields = options.jsont && res.fields.map((field, index) => ({ name: field.name, index }));
-		let temp = (cipherFunc || options.enc && options.enc.password) && rows.map(row => fields ? [...row] : { ...row }).map(row => {
-			(fields || Object.keys(row))
-				.filter(key => this._isCipherColumn(key.name || key, this._object.select))
-				.map(key => key.index || key)
-				.filter(key => typeof (row[key]) == 'string')
-				.forEach(key => {
-					if (cipherFunc) {
-						let val = options.enc(row[key], decipher);
-						if (val === undefined)
-							delete row[key];
-						else
-							row[key] = val;
-					} else {
-						row[key] = this._cipher(row[key], options.enc.password, { ...options.enc, decipher });
-					}
-				});
+		let temp = (cipherFunc || options.enc && options.enc.password) && rows
+			.map((row) => typeof (row) == 'object' ? fields ? [...row] : { ...row } : row)
+			.map((row) => {
+				if (typeof (row) == 'object')
+					(fields || Object.keys(row))
+						.filter(key => this._isCipherColumn(key.name || key, this._object.select))
+						.map(key => key.index || key)
+						.filter(key => typeof (row[key]) == 'string')
+						.forEach(key => {
+							if (cipherFunc) {
+								let val = options.enc(row[key], decipher);
+								if (val === undefined)
+									delete row[key];
+								else
+									row[key] = val;
+							} else {
+								row[key] = this._cipher(row[key], options.enc.password, { ...options.enc, decipher });
+							}
+						});
 
-			return row;
-		});
+				return row;
+			});
 		return temp || rows;
 	}
 
 	_columnName(column) {
-		if (typeof (column) == 'object')
+		if (typeof (column) == 'object' && !column.$ && !column._/* && !Array.isArray(column._)*/)
 			return 'case';
 
 		if (typeof (column) != 'string')
@@ -126,7 +179,7 @@ module.exports = class QueryQuery extends QueryBuild {
 		let trimmed = column.trim();
 		let start = trimmed.indexOf('(');
 		let end = trimmed.indexOf(')', start);
-		return start > 0
+		let alias = start > 0
 			? end == trimmed.length - 1
 				? trimmed.substring(0, start).toLowerCase()
 				: '?column?'
@@ -135,6 +188,8 @@ module.exports = class QueryQuery extends QueryBuild {
 				: trimmed.includes('.') || trimmed.startsWith('"') && trimmed.endsWith('"')
 					? trimmed.split('.').slice(-1)[0].replace(/^"|"$/g, '')
 					: '?column?';
+		// console.log('_columnName', column, alias);
+		return alias;
 	}
 
 	_convertRes(res, options) {
@@ -144,18 +199,19 @@ module.exports = class QueryQuery extends QueryBuild {
 
 		let fields = options.jsont && res.fields.reduce((prev, { name }, i) => ({ [name]: String(i), ...prev }), {});
 		let cols = this._object.select || this._object.return || this._object.tables || this._object.columns;
+		let types = new Set(['object', 'string']);
 		let col = (cols || []).reduce((col, el) => {
 			if (el instanceof Object) {
-				let types = ['object', 'string'];
-				if (types.includes(typeof (el.$)))
+				if (types.has(typeof (el.$)))
 					col.$ = fields ? fields[el.$] : this._columnName(el.$);
-				if (types.includes(typeof (el._)))
-					col._ = fields ? fields[el._] : this._columnName(el._);
-				else if (Array.isArray(el._))
-					col._ = el._
-						.filter(x => types.includes(typeof (x)))
-						.map(x => fields ? fields[x] : this._columnName(x));
+				if (types.has(typeof (el._)))
+					col._ = Array.isArray(el._)
+						? el._
+							.filter(x => types.has(typeof (x)))
+							.map(x => fields ? fields[x] : this._columnName(x))
+						: fields ? fields[el._] : this._columnName(el._);
 			}
+			// console.log('_convertRes.reduce', el, col);
 
 			return col;
 		}, {});
@@ -207,14 +263,31 @@ module.exports = class QueryQuery extends QueryBuild {
 	}
 
 	_insertValues(keys, values) {
-		values = this._cipherRows((values || this._object.insert).filter(el => el), {}, false)
+		if (typeof (this._opt.enc) == 'function' || this._opt.enc && this._opt.enc.password) {
+			values = this._cipherRows((values || this._object.insert).filter(el => el), {}, false);
+		}
 
 		return super._insertValues(keys, values);
 	}
 	_update(update) {
-		update = this._cipherRows((update || this._object.update).filter(el => el), {}, false);
+		if (typeof (this._opt.enc) == 'function' || this._opt.enc && this._opt.enc.password) {
+			update = this._cipherRows((update || this._object.update).filter(el => el), {}, false);
+		}
 
 		return super._update(update);
+	}
+
+	_where(where, separator) {
+		if (typeof (this._opt.enc) == 'function' || this._opt.enc && this._opt.enc.password) {
+			let cipher = (conds) => Array.isArray(conds)
+				? conds.map(cond => cipher(cond))
+				: typeof (conds) == 'object' && conds
+					? this._cipherRows([conds], { jsont: false }, false)[0]
+					: conds;
+			where = cipher(where === undefined ? this._object.where : where);
+		}
+
+		return super._where(where, separator);
 	}
 
 	_callDoc(method, ...args) {
@@ -312,16 +385,22 @@ module.exports = class QueryQuery extends QueryBuild {
 			let finalRes = null;
 			let finalDoc = null;
 			let finalErr = null;
+			let nanoSec = process.hrtime();
 
+			// console.log('fetch', client._connectionString, sql);
 			/*return*/ client.query({ text: sql, values: this._object.queryValues, rowMode: options.jsont && 'array' }).then((res) => {
 				let doc = undefined;
 				if (res) {
 					finalRes = res;
 
+					if (options.log.res) {
+						console.log('RES', finalRes);
+					}
+
 					if (Array.isArray(res)) {
 						doc = res.map((sub, i) => {
 							if (sub.fields && sub.fields.length) {
-								let queries = (isArray ? this._object.query : isObject ? Object.values(this._object.query) : [])
+								let queries = /*this._flatten*/(isArray ? this._object.query : isObject ? Object.values(this._object.query) : [])
 									.map(query => typeof (query) == 'function' ? query.call(this) : query);
 								let query = queries.length > i
 									? queries[i]
@@ -369,25 +448,38 @@ module.exports = class QueryQuery extends QueryBuild {
 				}
 			}).catch((err) => {
 				if (err) {
-					if (err.position && err.position < sql.length) {
+					let where = err.where || sql;
+					if (err.position && err.position < where.length) {
 						// let pos = parseInt(err.position);
-						let start = sql.lastIndexOf('\n', err.position);
-						let end = sql.indexOf('\n', err.position);
+						let start = where.lastIndexOf('\n', err.position);
+						let end = where.indexOf('\n', err.position);
 
 						var line = 0;
 						var pos = undefined;
 						while (pos === undefined || pos > -1 && pos < err.position) {
-							pos = sql.indexOf('\n', pos === undefined ? pos : pos + 1);
+							pos = where.indexOf('\n', pos === undefined ? pos : pos + 1);
 							line++;
 						}
-						err.message += ` [line ${line}: ${sql.substring(start > -0 ? start : 0, end > -1 ? end : sql.length).trim()}]`;
-					} else if (err.where) {
-						err.message += ` [where: ${err.where.length > 128 ? err.where.substring(0, 128) + '...' : err.where}]`;
-					} else if (err.hint) {
-						err.message += ` [hint: ${err.hint}]`;
-					} else {
-						err.message += ` [query: ${sql.length > 128 ? sql.substring(0, 128) + '...' : sql}]`;
+						if (line)
+							err.line = line;
+
+						start = start > -0 ? start : 0;
+						end = end > -1 ? end : where.length;
+						where = where.substring(start, end).trim();
+						where = `${where.substring(0, err.position - (start + 1))}^^^${where.substring(err.position - (start + 1))}`;
 					}
+					err.where = where.length > 256 ? where.substring(0, 256) + '...' : where;
+
+					let add = {
+						hint: err.hint,
+						routine: err.routine,
+						where: err.where,
+					};
+					if (Object.values(add).some(val => val))
+						err.message += ' | ' + Object.keys(add)
+							.filter(key => add[key])
+							.map((key) => `${key}: ${add[key]}`, '')
+							.join(', ');
 
 					if (options.log.err) {
 						// const MAX_SQL_LENGTH = 512;
@@ -395,14 +487,18 @@ module.exports = class QueryQuery extends QueryBuild {
 						// if (!options.log.sql)
 						// 	console.log('SQL', options.sql && sql.length > options.sql ? sql.substring(0, options.sql) + '...' : sql);
 
-						console.error('ERR', err.toString()/*, `[${err.hint}]`*/);
+						console.error(/*'ERR', */err/*.toString()*//*, `[${err.hint}]`*/);
+
+						if (options.log.opt) {
+							console.log(...logArgs(toTable(excludeProperties(options.db && (options.db.options || options.db.connectionParameters || options.db._client && options.db._client.options || options.db._client), excl))));
+						}
 					}
 
 					finalErr = err;
 				}
 			}).finally(() => {
 				if (options.log.doc) {
-					console.log('DOC', doc);
+					console.log('DOC', finalDoc);
 				}
 
 				// console.log('query', finalRes, finalDoc, finalErr);
@@ -413,10 +509,11 @@ module.exports = class QueryQuery extends QueryBuild {
 							callback.status(err ? 400 : 200).send({ ...(isObject ? doc : { doc }), err: err ? (!!options.msg || err) : undefined, msg: err ? (options.msg || err.toString()) : undefined });
 						else*/ if (typeof (callback) == 'function')
 							try {
+								let finalSec = process.hrtime(nanoSec)[1] / 1000000000;
 								if (isObject && finalDoc && finalDoc.$doc !== undefined && finalDoc.$len !== undefined)
-									callback(finalErr, finalDoc.$doc, finalDoc.$len, sql, finalRes);
+									callback(finalErr, finalDoc.$doc, finalDoc.$len, sql, finalSec, finalRes);
 								else
-									callback(finalErr, finalDoc, undefined, sql, finalRes);
+									callback(finalErr, finalDoc, undefined, sql, finalSec, finalRes);
 							} catch (ex) {
 								console.error('query', ex);
 
