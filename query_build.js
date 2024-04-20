@@ -20,7 +20,11 @@
 		static RESERVED_KEYS = RESERVED_KEYS;
 
 		_wrap(col, braces) {
-			return col.match(/\W/) ? braces && col.match(/\s/) ? `(${col})` : col : `"${col}"`;
+			return col.match(/\W/)
+				? braces && col.match(/\s/)
+					? `(${col})`
+					: col
+				: `"${col}"`;
 		}
 
 		_case(obj) {
@@ -37,9 +41,9 @@
 							? `(${this._clone().query(null, el).build()}) query`
 							: Object.keys(el)
 								.filter(key => !(this._object.join && this._object.join.some(join => Object.keys(join).includes(key))))
-								.map(key => `${el[key]} AS ${key}`)
+								.map(key => `${this._wrap(el[key])} AS ${this._wrap(key)}`)
 						: !(this._object.join && this._object.join.some(join => Object.keys(join).includes(el)))
-							? el
+							? this._wrap(el)
 							: undefined
 				}).filter(el => el && !(Array.isArray(el) && el.length == 0) && !(typeof (el) == 'object' && Object.keys(el).length == 0)).join(', ')
 				: this._object.table instanceof Object
@@ -47,9 +51,9 @@
 						? `(${this._clone().query(null, this._object.table).build()}) query`
 						: Object.keys(this._object.table)
 							.filter(key => !(this._object.join && this._object.join.some(join => Object.keys(join).includes(key))))
-							.map(key => `${this._object.table[key] instanceof QueryBuild ? '(' + this._object.table[key] + ')' : this._object.table[key]} AS ${key}`)
+							.map(key => `${this._object.table[key] instanceof QueryBuild ? '(' + this._object.table[key] + ')' : this._wrap(this._object.table[key])} AS ${this._wrap(key)}`)
 							.join(', ')
-					: this._object.table;
+					: this._wrap(this._object.table);
 		}
 
 		_join(join_type) {
@@ -66,10 +70,10 @@
 						if (typeof (val) == 'object' && val.from)
 							return {
 								join: val.join || join_type,
-								from: `(${this._clone().query(null, val.from).build()})`,
+								from: this._clone().query(null, val.from),
 								as: key,
 								on: val.on
-							}
+							};
 						else if (typeof (val) == 'string')
 							return {
 								join: join_type,
@@ -86,8 +90,8 @@
 						};
 					}).map((obj) => {
 						let join = obj.join ? `${obj.join} ` : '';
-						let from = `JOIN ${obj.from}`;
-						let as = obj.as ? ` AS ${obj.as}` : '';
+						let from = obj.from instanceof QueryBuild ? `JOIN (${obj.from})` : `JOIN "${obj.from}"`;
+						let as = obj.as ? ` AS "${obj.as}"` : '';
 						let on = obj.on ? ` ON ${this._where(obj.on)}` : '';
 						return join + from + as + on;
 					}).join(' ')
@@ -438,7 +442,7 @@
 						return `${key} ${val}`;
 					}).join(', ');
 				else
-					return arg;
+					return !arg.match(/\W/) ? `"${arg}"` : arg;
 			});
 
 			return args.join(', ');
@@ -449,7 +453,7 @@
 			if (!conflict)
 				return null;
 
-			let columns = conflict.filter(el => typeof (el) == 'string' && !el.match(/\s/)).join(', ');
+			let columns = conflict.filter(el => typeof (el) == 'string' && !el.match(/\s/)).map(el => `"${el}"`).join(', ');
 			let where = conflict.filter(el => typeof (el) != 'string' || el.match(/\s/)).map(el => this._where(el)).join(' AND ');
 
 			return `ON CONFLICT` + (columns ? ` (${columns})` : '') + (where ? ` WHERE ${where}` : '');
@@ -467,7 +471,7 @@
 							if (typeof (val) == 'string' && !val.match(/\W/))
 								val = `"${val}"`;
 
-							return key == '$' ? val : `${val} AS ${key}`;
+							return key == '$' ? val : `${val} AS "${key}"`;
 						}).join(', ')
 						: typeof (obj) == 'string' && !obj.match(/\W/)
 							? `"${obj}"`
@@ -490,7 +494,7 @@
 							else if (val instanceof Object)
 								val = val.$ || val._ || val;
 
-							return key == '$' ? val : `${val} AS ${key}`;
+							return key == '$' ? val : `${val} AS "${key}"`;
 						}).join(', ')
 						: typeof (obj) == 'string' && !obj.match(/\W/)
 							? `"${obj}"`
@@ -549,7 +553,7 @@
 						let excluded = set
 							.reduce((cols, col) => {
 								if (!cols[col])
-									cols[col] = { $: `excluded.${col}` };
+									cols[col] = { $: `excluded."${col}"` };
 								return cols;
 							}, {});
 						if (typeof (update[0]) == 'function')
@@ -578,12 +582,12 @@
 				return `DROP DATABASE IF EXISTS ${this._object.dropDatabase}`;
 			else if (this._object.tables) {
 				let where = this._where();
-				let query = `SELECT ${this._tables()} FROM pg_tables`;
+				let query = `SELECT ${this._tables()} FROM "pg_tables"`;
 				return query + (where ? ` WHERE ${where}` : '');
 			} else if (this._object.columns)
 				return `SELECT ${this._columns()}
-					FROM information_schema.columns
-					WHERE table_name = '${this._table()}'`;
+					FROM "information_schema"."columns"
+					WHERE "table_name" = '${this._object.table}'`;
 			else if (this._object.addColumn)
 				return `ALTER TABLE ${this._table()} ${this._object.addColumn}`;
 			else if (this._object.dropColumn)
